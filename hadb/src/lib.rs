@@ -18,10 +18,14 @@
 //! coordinator.join("mydb", path).await?;
 //! ```
 
+pub mod metrics;
 pub mod traits;
+pub mod types;
 
 // Re-export core traits
 pub use traits::{CasResult, Executor, LeaseStore, Replicator, StorageBackend};
+pub use types::{CoordinatorConfig, LeaseConfig, Role, RoleEvent};
+pub use metrics::{HaMetrics, MetricsSnapshot};
 
 // Placeholder Coordinator - will be implemented in next step
 use std::sync::Arc;
