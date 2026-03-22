@@ -20,6 +20,7 @@
 
 pub mod lease;
 pub mod metrics;
+pub mod node_registry;
 pub mod traits;
 pub mod types;
 
@@ -28,6 +29,7 @@ pub use traits::{CasResult, Executor, LeaseStore, Replicator, StorageBackend};
 pub use types::{CoordinatorConfig, LeaseConfig, Role, RoleEvent};
 pub use metrics::{HaMetrics, MetricsSnapshot};
 pub use lease::{DbLease, LeaseData};
+pub use node_registry::{node_key, nodes_prefix, InMemoryNodeRegistry, NodeRegistry, NodeRegistration};
 
 // Placeholder Coordinator - will be implemented in next step
 use std::sync::Arc;

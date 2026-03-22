@@ -26,10 +26,12 @@
 
 mod error;
 pub mod lease_store;
+pub mod node_registry;
 pub mod storage;
 
 // Re-export for convenience
 pub use lease_store::S3LeaseStore;
+pub use node_registry::S3NodeRegistry;
 pub use storage::S3StorageBackend;
 
 // Type alias for S3-backed coordinator
