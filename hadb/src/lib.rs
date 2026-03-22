@@ -23,6 +23,7 @@
 //! coordinator.join("mydb", path).await?;
 //! ```
 
+pub mod client;
 pub mod coordinator;
 pub mod follower;
 pub mod lease;
@@ -38,4 +39,5 @@ pub use metrics::{HaMetrics, MetricsSnapshot};
 pub use lease::{DbLease, InMemoryLeaseStore, LeaseData};
 pub use node_registry::{node_key, nodes_prefix, InMemoryNodeRegistry, NodeRegistry, NodeRegistration};
 pub use follower::{FollowerBehavior, LeaseMonitorContext, run_leader_renewal, run_lease_monitor};
+pub use client::{HaClient, HaClientBuilder};
 pub use coordinator::Coordinator;
