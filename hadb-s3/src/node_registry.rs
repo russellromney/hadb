@@ -48,11 +48,11 @@ impl NodeRegistry for S3NodeRegistry {
                 Ok(data) => match serde_json::from_slice::<NodeRegistration>(&data) {
                     Ok(reg) => registrations.push(reg),
                     Err(e) => {
-                        tracing::warn!("Failed to parse node registration {}: {}", key, e);
+                        tracing::error!("Corrupted node registration {}: {}", key, e);
                     }
                 },
                 Err(e) => {
-                    tracing::warn!("Failed to download node registration {}: {}", key, e);
+                    tracing::error!("Failed to download node registration {}: {}", key, e);
                 }
             }
         }

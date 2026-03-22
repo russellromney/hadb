@@ -1,0 +1,639 @@
+//! HA coordinator — zero type parameters, all trait objects.
+//!
+//! Coordinates leader election, replication, and write forwarding across
+//! any database (SQL, graph, document) and any storage backend (S3, etcd, Consul).
+//!
+//! All dependencies are trait objects (`Arc<dyn Replicator>`, etc.) so there's no
+//! generic type gymnastics. The vtable overhead is unmeasurable — every trait method
+//! does network I/O.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::Arc;
+
+use anyhow::Result;
+use tokio::sync::{broadcast, watch, RwLock};
+use tokio::task::JoinHandle;
+
+use crate::follower::{run_leader_renewal, run_lease_monitor, FollowerBehavior, LeaseMonitorContext};
+use crate::lease::DbLease;
+use crate::metrics::HaMetrics;
+use crate::node_registry::{NodeRegistration, NodeRegistry};
+use crate::traits::{LeaseStore, Replicator};
+use crate::types::{CoordinatorConfig, Role, RoleEvent};
+
+/// Atomic wrapper around Role for lock-free reads.
+pub(crate) struct AtomicRole(AtomicU8);
+
+impl AtomicRole {
+    fn new(role: Role) -> Self {
+        Self(AtomicU8::new(role.to_u8()))
+    }
+
+    pub(crate) fn load(&self) -> Role {
+        Role::from_u8(self.0.load(Ordering::SeqCst))
+    }
+
+    pub(crate) fn store(&self, role: Role) {
+        self.0.store(role.to_u8(), Ordering::SeqCst);
+    }
+}
+
+/// Per-database entry in the coordinator.
+struct DbEntry {
+    role: Arc<AtomicRole>,
+    leader_address: Arc<RwLock<String>>,
+    cancel_tx: watch::Sender<bool>,
+    task_handle: JoinHandle<()>,
+}
+
+/// HA coordinator.
+///
+/// Coordinates leader election, replication, and write forwarding across
+/// any database and any storage backend. All dependencies are trait objects.
+pub struct Coordinator {
+    replicator: Arc<dyn Replicator>,
+    lease_store: Option<Arc<dyn LeaseStore>>,
+    node_registry: Option<Arc<dyn NodeRegistry>>,
+    follower_behavior: Arc<dyn FollowerBehavior>,
+    config: CoordinatorConfig,
+    prefix: String,
+    databases: RwLock<HashMap<String, DbEntry>>,
+    role_tx: broadcast::Sender<RoleEvent>,
+    metrics: Arc<HaMetrics>,
+}
+
+impl Coordinator {
+    /// Create a new Coordinator.
+    ///
+    /// `replicator` handles replication (snapshot + incremental updates).
+    /// `lease_store` is for CAS lease operations (None = no HA, always Leader).
+    /// `node_registry` is for read replica discovery (None = no registry).
+    /// `follower_behavior` defines database-specific follower pull and promotion logic.
+    /// `prefix` is the storage key prefix for all databases (e.g. "wal/" or "ha/").
+    /// `config` is the coordinator configuration.
+    pub fn new(
+        replicator: Arc<dyn Replicator>,
+        lease_store: Option<Arc<dyn LeaseStore>>,
+        node_registry: Option<Arc<dyn NodeRegistry>>,
+        follower_behavior: Arc<dyn FollowerBehavior>,
+        prefix: &str,
+        config: CoordinatorConfig,
+    ) -> Arc<Self> {
+        let (role_tx, _) = broadcast::channel(64);
+
+        Arc::new(Self {
+            replicator,
+            lease_store,
+            node_registry,
+            follower_behavior,
+            config,
+            prefix: prefix.to_string(),
+            databases: RwLock::new(HashMap::new()),
+            role_tx,
+            metrics: Arc::new(HaMetrics::new()),
+        })
+    }
+
+    /// Join a database to the HA cluster.
+    ///
+    /// If leases are enabled: claims the lease -> Leader, or follows -> Follower.
+    /// If leases are disabled: starts leader sync -> always Leader.
+    pub async fn join(self: &Arc<Self>, name: &str, db_path: &Path) -> Result<Role> {
+        let lease_store = match &self.lease_store {
+            Some(ls) => ls.clone(),
+            None => {
+                // No HA — always leader.
+                tokio::time::timeout(
+                    self.config.replicator_timeout,
+                    self.replicator.add(name, db_path),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Coordinator: replicator.add('{}') timed out after {:?}",
+                        name,
+                        self.config.replicator_timeout
+                    )
+                })??;
+
+                let (cancel_tx, _) = watch::channel(false);
+                self.databases.write().await.insert(
+                    name.to_string(),
+                    DbEntry {
+                        role: Arc::new(AtomicRole::new(Role::Leader)),
+                        leader_address: Arc::new(RwLock::new(String::new())),
+                        cancel_tx,
+                        task_handle: tokio::spawn(async {}),
+                    },
+                );
+                let _ = self.role_tx.send(RoleEvent::Joined {
+                    db_name: name.to_string(),
+                    role: Role::Leader,
+                });
+                tracing::info!("Coordinator: '{}' joined as Leader (no HA)", name);
+                return Ok(Role::Leader);
+            }
+        };
+
+        // HA mode: try to claim lease.
+        let lease_config = self
+            .config
+            .lease
+            .as_ref()
+            .expect("lease config must be present when lease_store is Some");
+
+        let mut lease = DbLease::new(
+            lease_store,
+            &self.prefix,
+            name,
+            &lease_config.instance_id,
+            &lease_config.address,
+            lease_config.ttl_secs,
+        );
+
+        self.metrics.inc(&self.metrics.lease_claims_attempted);
+        let role = lease.try_claim().await?;
+        match role {
+            Role::Leader => self.metrics.inc(&self.metrics.lease_claims_succeeded),
+            Role::Follower => self.metrics.inc(&self.metrics.lease_claims_failed),
+        }
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let shared_role = Arc::new(AtomicRole::new(role));
+
+        let leader_addr = Arc::new(RwLock::new(if role == Role::Leader {
+            lease_config.address.clone()
+        } else {
+            match DbLease::new(
+                self.lease_store.as_ref().unwrap().clone(),
+                &self.prefix,
+                name,
+                &lease_config.instance_id,
+                &lease_config.address,
+                lease_config.ttl_secs,
+            )
+            .read()
+            .await
+            {
+                Ok(Some((data, _))) => data.address,
+                _ => String::new(),
+            }
+        }));
+
+        match role {
+            Role::Leader => {
+                // Start leader sync.
+                tokio::time::timeout(
+                    self.config.replicator_timeout,
+                    self.replicator.add(name, db_path),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Coordinator: replicator.add('{}') timed out after {:?}",
+                        name,
+                        self.config.replicator_timeout
+                    )
+                })??;
+
+                // Spawn lease renewal loop.
+                let replicator = self.replicator.clone();
+                let db_name = name.to_string();
+                let role_tx = self.role_tx.clone();
+                let renew_interval = lease_config.renew_interval;
+                let max_errors = lease_config.max_consecutive_renewal_errors;
+                let replicator_timeout = self.config.replicator_timeout;
+                let role_ref = shared_role.clone();
+                let metrics = self.metrics.clone();
+                let mut renewal_cancel_rx = cancel_rx.clone();
+
+                let task_handle = tokio::spawn(async move {
+                    let demoted = run_leader_renewal(
+                        &mut lease,
+                        &replicator,
+                        &db_name,
+                        &role_tx,
+                        renew_interval,
+                        &mut renewal_cancel_rx,
+                        max_errors,
+                        replicator_timeout,
+                        metrics,
+                    )
+                    .await;
+                    if demoted {
+                        role_ref.store(Role::Follower);
+                    }
+                });
+
+                self.databases.write().await.insert(
+                    name.to_string(),
+                    DbEntry {
+                        role: shared_role,
+                        leader_address: leader_addr,
+                        cancel_tx,
+                        task_handle,
+                    },
+                );
+
+                let _ = self.role_tx.send(RoleEvent::Joined {
+                    db_name: name.to_string(),
+                    role: Role::Leader,
+                });
+                tracing::info!("Coordinator: '{}' joined as Leader", name);
+                Ok(Role::Leader)
+            }
+            Role::Follower => {
+                // Restore from storage to get a base snapshot.
+                tokio::time::timeout(
+                    self.config.replicator_timeout,
+                    self.replicator.pull(name, db_path),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Coordinator: replicator.pull('{}') timed out after {:?}",
+                        name,
+                        self.config.replicator_timeout
+                    )
+                })??;
+
+                // Register as follower for read replica discovery.
+                if let Some(ref registry) = self.node_registry {
+                    if let Ok(Some((leader_data, _))) = lease.read().await {
+                        let reg = NodeRegistration {
+                            instance_id: lease_config.instance_id.clone(),
+                            address: lease_config.address.clone(),
+                            role: "follower".to_string(),
+                            leader_session_id: leader_data.session_id,
+                            last_seen: chrono::Utc::now().timestamp() as u64,
+                        };
+                        if let Err(e) = registry.register(&self.prefix, name, &reg).await {
+                            tracing::error!(
+                                "Coordinator: failed to register follower '{}': {}",
+                                name,
+                                e
+                            );
+                        }
+                    }
+                }
+
+                let (follower_stop_tx, follower_stop_rx) = watch::channel(false);
+
+                let self_clone = self.clone();
+                let db_name = name.to_string();
+                let db_path_buf = db_path.to_path_buf();
+                let role_for_entry = shared_role.clone();
+                let addr_for_entry = leader_addr.clone();
+
+                let task_handle = tokio::spawn(async move {
+                    self_clone
+                        .run_follower_tasks(
+                            db_name,
+                            db_path_buf,
+                            lease,
+                            shared_role,
+                            leader_addr,
+                            follower_stop_tx,
+                            follower_stop_rx,
+                            cancel_rx,
+                        )
+                        .await;
+                });
+
+                self.databases.write().await.insert(
+                    name.to_string(),
+                    DbEntry {
+                        role: role_for_entry,
+                        leader_address: addr_for_entry,
+                        cancel_tx,
+                        task_handle,
+                    },
+                );
+
+                let _ = self.role_tx.send(RoleEvent::Joined {
+                    db_name: name.to_string(),
+                    role: Role::Follower,
+                });
+                tracing::info!("Coordinator: '{}' joined as Follower", name);
+                Ok(Role::Follower)
+            }
+        }
+    }
+
+    /// Run follower tasks (pull loop + lease monitor).
+    async fn run_follower_tasks(
+        self: Arc<Self>,
+        db_name: String,
+        db_path: std::path::PathBuf,
+        lease: DbLease,
+        shared_role: Arc<AtomicRole>,
+        leader_addr: Arc<RwLock<String>>,
+        follower_stop_tx: watch::Sender<bool>,
+        follower_stop_rx: watch::Receiver<bool>,
+        cancel_rx: watch::Receiver<bool>,
+    ) {
+        let lease_config = self
+            .config
+            .lease
+            .as_ref()
+            .expect("lease must be present");
+
+        // Shared position between pull loop and monitor.
+        // Pull loop updates it atomically; monitor reads it for warm promotion.
+        let shared_position = Arc::new(AtomicU64::new(0));
+
+        // Spawn follower pull loop
+        let follower_handle = {
+            let behavior = self.follower_behavior.clone();
+            let replicator = self.replicator.clone();
+            let prefix = self.prefix.clone();
+            let db_name_clone = db_name.clone();
+            let db_path_clone = db_path.clone();
+            let pull_interval = self.config.follower_pull_interval;
+            let metrics = self.metrics.clone();
+            let position = shared_position.clone();
+
+            tokio::spawn(async move {
+                let _ = behavior
+                    .run_follower_loop(
+                        replicator,
+                        &prefix,
+                        &db_name_clone,
+                        &db_path_clone,
+                        pull_interval,
+                        position,
+                        follower_stop_rx,
+                        metrics,
+                    )
+                    .await;
+            })
+        };
+
+        // Spawn lease monitor (generic — calls follower_behavior.catchup_on_promotion for DB-specific part)
+        let monitor_handle = {
+            let ctx = LeaseMonitorContext {
+                lease,
+                replicator: self.replicator.clone(),
+                follower_behavior: self.follower_behavior.clone(),
+                prefix: self.prefix.clone(),
+                db_name,
+                db_path,
+                follower_stop_tx,
+                role_tx: self.role_tx.clone(),
+                config: lease_config.clone(),
+                replicator_timeout: self.config.replicator_timeout,
+                leader_address: leader_addr,
+                role_ref: Arc::new(AtomicU8::new(shared_role.load().to_u8())),
+                self_address: lease_config.address.clone(),
+                follower_position: shared_position.clone(),
+                cancel_rx,
+                node_registry: self.node_registry.clone(),
+                metrics: self.metrics.clone(),
+            };
+
+            tokio::spawn(async move {
+                let _ = run_lease_monitor(ctx).await;
+            })
+        };
+
+        let _ = tokio::join!(follower_handle, monitor_handle);
+    }
+
+    /// Leave the HA cluster for a database.
+    pub async fn leave(&self, name: &str) -> Result<()> {
+        let entry = self.databases.write().await.remove(name);
+        let entry = match entry {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+
+        let _ = entry.cancel_tx.send(true);
+        let role = entry.role.load();
+
+        match role {
+            Role::Leader => {
+                if tokio::time::timeout(
+                    self.config.replicator_timeout,
+                    self.replicator.remove(name),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::error!(
+                        "Coordinator: replicator.remove('{}') timed out after {:?}, continuing leave",
+                        name,
+                        self.config.replicator_timeout
+                    );
+                }
+
+                if let Some(ls) = &self.lease_store {
+                    if let Some(lease_config) = &self.config.lease {
+                        let lease = DbLease::new(
+                            ls.clone(),
+                            &self.prefix,
+                            name,
+                            &lease_config.instance_id,
+                            &lease_config.address,
+                            lease_config.ttl_secs,
+                        );
+                        match lease.read().await {
+                            Ok(Some((data, _)))
+                                if data.instance_id == lease_config.instance_id =>
+                            {
+                                if let Err(e) = ls.delete(lease.lease_key()).await {
+                                    tracing::error!(
+                                        "Coordinator: failed to release lease for '{}': {}",
+                                        name,
+                                        e
+                                    );
+                                }
+                            }
+                            Ok(Some((data, _))) => {
+                                tracing::info!(
+                                    "Coordinator: lease for '{}' held by {} (not us), skipping release",
+                                    name,
+                                    data.instance_id
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::error!(
+                                    "Coordinator: failed to read lease for '{}' during leave: {}",
+                                    name,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+                tracing::info!("Coordinator: '{}' left (was Leader)", name);
+            }
+            Role::Follower => {
+                if let (Some(ref registry), Some(ref lease_config)) =
+                    (&self.node_registry, &self.config.lease)
+                {
+                    if let Err(e) = registry
+                        .deregister(&self.prefix, name, &lease_config.instance_id)
+                        .await
+                    {
+                        tracing::error!(
+                            "Coordinator: failed to deregister follower '{}': {}",
+                            name,
+                            e
+                        );
+                    }
+                }
+                tracing::info!("Coordinator: '{}' left (was Follower)", name);
+            }
+        }
+
+        let _ = entry.task_handle.await;
+        Ok(())
+    }
+
+    /// Get the current role of a database.
+    pub async fn role(&self, name: &str) -> Option<Role> {
+        self.databases
+            .read()
+            .await
+            .get(name)
+            .map(|e| e.role.load())
+    }
+
+    /// Get the current leader's address for a database.
+    pub async fn leader_address(&self, name: &str) -> Option<String> {
+        let addr = self
+            .databases
+            .read()
+            .await
+            .get(name)
+            .map(|e| e.leader_address.clone());
+        match addr {
+            Some(a) => Some(a.read().await.clone()),
+            None => None,
+        }
+    }
+
+    /// Subscribe to role change events.
+    pub fn role_events(&self) -> broadcast::Receiver<RoleEvent> {
+        self.role_tx.subscribe()
+    }
+
+    /// Get shared metrics reference.
+    pub fn metrics(&self) -> &Arc<HaMetrics> {
+        &self.metrics
+    }
+
+    /// Discover registered replicas for a database.
+    pub async fn discover_replicas(&self, name: &str) -> Result<Vec<NodeRegistration>> {
+        let registry = match &self.node_registry {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
+        let lease_config = match &self.config.lease {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+
+        let all = registry.discover_all(&self.prefix, name).await?;
+
+        let current_session_id = match &self.lease_store {
+            Some(ls) => {
+                let lease = DbLease::new(
+                    ls.clone(),
+                    &self.prefix,
+                    name,
+                    &lease_config.instance_id,
+                    &lease_config.address,
+                    lease_config.ttl_secs,
+                );
+                match lease.read().await {
+                    Ok(Some((data, _))) => data.session_id,
+                    _ => return Ok(Vec::new()),
+                }
+            }
+            None => return Ok(Vec::new()),
+        };
+
+        Ok(all
+            .into_iter()
+            .filter(|r| r.is_valid(&current_session_id, lease_config.ttl_secs * 6))
+            .collect())
+    }
+
+    /// Check if a specific database is in the coordinator.
+    pub async fn contains(&self, name: &str) -> bool {
+        self.databases.read().await.contains_key(name)
+    }
+
+    /// Number of databases currently managed.
+    pub async fn database_count(&self) -> usize {
+        self.databases.read().await.len()
+    }
+
+    /// Graceful leader handoff — release leadership without leaving the cluster.
+    pub async fn handoff(&self, name: &str) -> Result<bool> {
+        let entry = self.databases.read().await;
+        let entry = match entry.get(name) {
+            Some(e) => e,
+            None => return Ok(false),
+        };
+
+        if entry.role.load() != Role::Leader {
+            return Ok(false);
+        }
+
+        let _ = entry.cancel_tx.send(true);
+
+        if tokio::time::timeout(
+            self.config.replicator_timeout,
+            self.replicator.remove(name),
+        )
+        .await
+        .is_err()
+        {
+            tracing::error!(
+                "Coordinator: handoff replicator.remove('{}') timed out after {:?}",
+                name,
+                self.config.replicator_timeout
+            );
+        }
+
+        if let Some(ls) = &self.lease_store {
+            if let Some(lease_config) = &self.config.lease {
+                let lease = DbLease::new(
+                    ls.clone(),
+                    &self.prefix,
+                    name,
+                    &lease_config.instance_id,
+                    &lease_config.address,
+                    lease_config.ttl_secs,
+                );
+                match lease.read().await {
+                    Ok(Some((data, _)))
+                        if data.instance_id == lease_config.instance_id =>
+                    {
+                        if let Err(e) = ls.delete(lease.lease_key()).await {
+                            tracing::error!(
+                                "Coordinator: failed to release lease during handoff for '{}': {}",
+                                name,
+                                e
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        entry.role.store(Role::Follower);
+        let _ = self.role_tx.send(RoleEvent::Demoted {
+            db_name: name.to_string(),
+        });
+
+        tracing::info!("Coordinator: '{}' handed off leadership", name);
+        Ok(true)
+    }
+}

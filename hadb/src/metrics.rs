@@ -88,11 +88,11 @@ impl HaMetrics {
 
     // Convenience increment helpers.
 
-    pub(crate) fn inc(&self, counter: &AtomicU64) {
+    pub fn inc(&self, counter: &AtomicU64) {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn record_duration(&self, target: &AtomicU64, start: Instant) {
+    pub fn record_duration(&self, target: &AtomicU64, start: Instant) {
         target.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
     }
 }

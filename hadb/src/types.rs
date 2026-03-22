@@ -7,6 +7,25 @@ pub enum Role {
     Follower,
 }
 
+impl Role {
+    /// Convert Role to u8 for atomic storage.
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Role::Leader => 0,
+            Role::Follower => 1,
+        }
+    }
+
+    /// Convert u8 back to Role. Panics if invalid value.
+    pub fn from_u8(val: u8) -> Self {
+        match val {
+            0 => Role::Leader,
+            1 => Role::Follower,
+            _ => panic!("Invalid role value: {}", val),
+        }
+    }
+}
+
 impl std::fmt::Display for Role {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -121,6 +140,30 @@ mod tests {
         assert_eq!(Role::Leader, Role::Leader);
         assert_eq!(Role::Follower, Role::Follower);
         assert_ne!(Role::Leader, Role::Follower);
+    }
+
+    #[test]
+    fn test_role_to_u8() {
+        assert_eq!(Role::Leader.to_u8(), 0);
+        assert_eq!(Role::Follower.to_u8(), 1);
+    }
+
+    #[test]
+    fn test_role_from_u8() {
+        assert_eq!(Role::from_u8(0), Role::Leader);
+        assert_eq!(Role::from_u8(1), Role::Follower);
+    }
+
+    #[test]
+    fn test_role_roundtrip() {
+        assert_eq!(Role::from_u8(Role::Leader.to_u8()), Role::Leader);
+        assert_eq!(Role::from_u8(Role::Follower.to_u8()), Role::Follower);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid role value: 2")]
+    fn test_role_from_u8_invalid() {
+        Role::from_u8(2);
     }
 
     #[test]

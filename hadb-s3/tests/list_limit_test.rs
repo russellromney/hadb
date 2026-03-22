@@ -4,11 +4,9 @@ use anyhow::Result;
 use hadb::StorageBackend;
 use hadb_s3::S3StorageBackend;
 
-fn s3_client() -> aws_sdk_s3::Client {
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let config = aws_config::load_from_env().await;
-        aws_sdk_s3::Client::new(&config)
-    })
+async fn s3_client() -> aws_sdk_s3::Client {
+    let config = aws_config::load_from_env().await;
+    aws_sdk_s3::Client::new(&config)
 }
 
 fn test_bucket() -> Option<String> {
@@ -19,7 +17,7 @@ fn test_bucket() -> Option<String> {
 #[ignore] // Requires S3 credentials
 async fn test_list_with_limit() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
-    let client = s3_client();
+    let client = s3_client().await;
     let storage = S3StorageBackend::new(client, bucket);
 
     let prefix = format!("test-list-limit-{}/", uuid::Uuid::new_v4());
@@ -54,7 +52,7 @@ async fn test_list_with_limit() -> Result<()> {
 #[ignore] // Requires S3 credentials
 async fn test_list_pagination_with_limit() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
-    let client = s3_client();
+    let client = s3_client().await;
     let storage = S3StorageBackend::new(client, bucket);
 
     let prefix = format!("test-list-page-{}/", uuid::Uuid::new_v4());

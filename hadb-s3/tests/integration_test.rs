@@ -16,11 +16,9 @@ use anyhow::Result;
 use hadb::{LeaseStore, StorageBackend};
 use hadb_s3::{S3LeaseStore, S3StorageBackend};
 
-fn s3_client() -> aws_sdk_s3::Client {
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let config = aws_config::load_from_env().await;
-        aws_sdk_s3::Client::new(&config)
-    })
+async fn s3_client() -> aws_sdk_s3::Client {
+    let config = aws_config::load_from_env().await;
+    aws_sdk_s3::Client::new(&config)
 }
 
 fn test_bucket() -> Option<String> {
@@ -31,7 +29,7 @@ fn test_bucket() -> Option<String> {
 #[ignore] // Requires S3 credentials
 async fn test_s3_lease_store_create_and_read() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
-    let client = s3_client();
+    let client = s3_client().await;
     let store = S3LeaseStore::new(client, bucket);
 
     let key = format!("test-lease-{}", uuid::Uuid::new_v4());
@@ -62,7 +60,7 @@ async fn test_s3_lease_store_create_and_read() -> Result<()> {
 #[ignore] // Requires S3 credentials
 async fn test_s3_lease_store_cas_conflict() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
-    let client = s3_client();
+    let client = s3_client().await;
     let store = S3LeaseStore::new(client, bucket);
 
     let key = format!("test-lease-{}", uuid::Uuid::new_v4());
@@ -85,7 +83,7 @@ async fn test_s3_lease_store_cas_conflict() -> Result<()> {
 #[ignore] // Requires S3 credentials
 async fn test_s3_lease_store_cas_update() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
-    let client = s3_client();
+    let client = s3_client().await;
     let store = S3LeaseStore::new(client, bucket);
 
     let key = format!("test-lease-{}", uuid::Uuid::new_v4());
@@ -115,7 +113,7 @@ async fn test_s3_lease_store_cas_update() -> Result<()> {
 #[ignore] // Requires S3 credentials
 async fn test_s3_storage_backend_upload_download() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
-    let client = s3_client();
+    let client = s3_client().await;
     let storage = S3StorageBackend::new(client, bucket);
 
     let key = format!("test-data-{}", uuid::Uuid::new_v4());
@@ -138,7 +136,7 @@ async fn test_s3_storage_backend_upload_download() -> Result<()> {
 #[ignore] // Requires S3 credentials
 async fn test_s3_storage_backend_list() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
-    let client = s3_client();
+    let client = s3_client().await;
     let storage = S3StorageBackend::new(client, bucket);
 
     let prefix = format!("test-prefix-{}/", uuid::Uuid::new_v4());
@@ -165,7 +163,7 @@ async fn test_s3_storage_backend_list() -> Result<()> {
 #[ignore] // Requires S3 credentials
 async fn test_s3_storage_backend_download_not_found() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
-    let client = s3_client();
+    let client = s3_client().await;
     let storage = S3StorageBackend::new(client, bucket);
 
     let key = format!("non-existent-{}", uuid::Uuid::new_v4());
@@ -182,7 +180,7 @@ async fn test_s3_storage_backend_download_not_found() -> Result<()> {
 #[ignore] // Requires S3 credentials
 async fn test_s3_storage_backend_delete_idempotent() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
-    let client = s3_client();
+    let client = s3_client().await;
     let storage = S3StorageBackend::new(client, bucket);
 
     let key = format!("test-delete-{}", uuid::Uuid::new_v4());

@@ -2,7 +2,6 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use hadb::StorageBackend;
 
 /// StorageBackend backed by S3.
@@ -21,25 +20,6 @@ pub struct S3StorageBackend {
 impl S3StorageBackend {
     pub fn new(client: aws_sdk_s3::Client, bucket: String) -> Self {
         Self { client, bucket }
-    }
-
-    /// Check if an S3 error is a 404 NoSuchKey (key doesn't exist).
-    fn is_not_found(
-        err: &aws_sdk_s3::error::SdkError<impl ProvideErrorMetadata + std::fmt::Debug>,
-    ) -> bool {
-        if let Some(service_err) = err.as_service_error() {
-            if let Some(code) = service_err.code() {
-                if code == "NoSuchKey" || code == "NotFound" {
-                    return true;
-                }
-            }
-        }
-        if let Some(raw) = err.raw_response() {
-            if raw.status().as_u16() == 404 {
-                return true;
-            }
-        }
-        false
     }
 }
 
@@ -72,7 +52,7 @@ impl StorageBackend for S3StorageBackend {
                 Ok(body)
             }
             Err(e) => {
-                if Self::is_not_found(&e) {
+                if crate::error::is_not_found(&e) {
                     Err(anyhow!("Key not found: {}", key))
                 } else {
                     Err(anyhow!("S3 GetObject failed: {}", e))
