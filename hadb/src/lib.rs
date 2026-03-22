@@ -18,6 +18,7 @@
 //! coordinator.join("mydb", path).await?;
 //! ```
 
+pub mod lease;
 pub mod metrics;
 pub mod traits;
 pub mod types;
@@ -26,6 +27,7 @@ pub mod types;
 pub use traits::{CasResult, Executor, LeaseStore, Replicator, StorageBackend};
 pub use types::{CoordinatorConfig, LeaseConfig, Role, RoleEvent};
 pub use metrics::{HaMetrics, MetricsSnapshot};
+pub use lease::{DbLease, LeaseData};
 
 // Placeholder Coordinator - will be implemented in next step
 use std::sync::Arc;

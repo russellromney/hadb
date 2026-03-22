@@ -23,6 +23,7 @@ anyhow = "1"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
 
 # HTTP
 axum = "0.8"
