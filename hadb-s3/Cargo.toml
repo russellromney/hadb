@@ -1,0 +1,37 @@
+[package]
+name = "hadb-s3"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "S3 reference implementation for hadb. LeaseStore and StorageBackend via S3."
+keywords = ["ha", "s3", "leader-election", "replication"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+# Core hadb dependency
+hadb = { path = "../hadb" }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# S3
+aws-sdk-s3 = "1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-smithy-types = "1"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+uuid = { workspace = true }

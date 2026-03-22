@@ -1,0 +1,29 @@
+[package]
+name = "hadb"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Database-agnostic HA coordination framework. Leader election, replication, write forwarding."
+keywords = ["ha", "replication", "leader-election", "coordination"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+# Core traits and coordination logic - ZERO cloud dependencies
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+axum = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
