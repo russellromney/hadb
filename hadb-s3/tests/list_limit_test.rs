@@ -1,8 +1,10 @@
 //! Tests for list() max_keys limit.
 
 use anyhow::Result;
+use futures::stream::{self, StreamExt};
 use hadb::StorageBackend;
 use hadb_s3::S3StorageBackend;
+use std::sync::Arc;
 
 async fn s3_client() -> aws_sdk_s3::Client {
     let config = aws_config::load_from_env().await;
@@ -13,37 +15,45 @@ fn test_bucket() -> Option<String> {
     std::env::var("S3_TEST_BUCKET").ok()
 }
 
+const CONCURRENCY: usize = 50;
+
 #[tokio::test]
 #[ignore] // Requires S3 credentials
 async fn test_list_with_limit() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
     let client = s3_client().await;
-    let storage = S3StorageBackend::new(client, bucket);
+    let storage = Arc::new(S3StorageBackend::new(client, bucket));
 
     let prefix = format!("test-list-limit-{}/", uuid::Uuid::new_v4());
 
-    // Upload 10 objects
-    for i in 0..10 {
-        let key = format!("{}{}", prefix, i);
-        storage.upload(&key, b"data").await?;
-    }
+    // Upload 10 objects concurrently.
+    let keys: Vec<String> = (0..10).map(|i| format!("{}{}", prefix, i)).collect();
+    stream::iter(keys.clone())
+        .for_each_concurrent(CONCURRENCY, |key| {
+            let s = storage.clone();
+            async move { s.upload(&key, b"data").await.unwrap(); }
+        })
+        .await;
 
     // List with limit 5
-    let keys = storage.list(&prefix, Some(5)).await?;
-    assert_eq!(keys.len(), 5);
+    let listed = storage.list(&prefix, Some(5)).await?;
+    assert_eq!(listed.len(), 5);
 
     // List with limit 20 (more than available)
-    let keys = storage.list(&prefix, Some(20)).await?;
-    assert_eq!(keys.len(), 10);
+    let listed = storage.list(&prefix, Some(20)).await?;
+    assert_eq!(listed.len(), 10);
 
     // List with no limit
-    let keys = storage.list(&prefix, None).await?;
-    assert_eq!(keys.len(), 10);
+    let listed = storage.list(&prefix, None).await?;
+    assert_eq!(listed.len(), 10);
 
-    // Cleanup
-    for key in keys {
-        storage.delete(&key).await?;
-    }
+    // Cleanup concurrently.
+    stream::iter(keys)
+        .for_each_concurrent(CONCURRENCY, |key| {
+            let s = storage.clone();
+            async move { s.delete(&key).await.unwrap(); }
+        })
+        .await;
 
     Ok(())
 }
@@ -53,28 +63,41 @@ async fn test_list_with_limit() -> Result<()> {
 async fn test_list_pagination_with_limit() -> Result<()> {
     let bucket = test_bucket().expect("S3_TEST_BUCKET not set");
     let client = s3_client().await;
-    let storage = S3StorageBackend::new(client, bucket);
+    let storage = Arc::new(S3StorageBackend::new(client, bucket));
 
     let prefix = format!("test-list-page-{}/", uuid::Uuid::new_v4());
 
-    // Upload 2500 objects (more than 2 S3 pages at 1000 per page)
-    for i in 0..2500 {
-        let key = format!("{}{:04}", prefix, i);
-        storage.upload(&key, b"data").await?;
-    }
+    // 1050 objects — just over one S3 page (1000). Enough to prove pagination.
+    let count = 1050;
+    let keys: Vec<String> = (0..count).map(|i| format!("{}{:04}", prefix, i)).collect();
 
-    // List with limit 1500 (crosses page boundary)
-    let keys = storage.list(&prefix, Some(1500)).await?;
-    assert_eq!(keys.len(), 1500);
+    // Upload concurrently.
+    stream::iter(keys.clone())
+        .for_each_concurrent(CONCURRENCY, |key| {
+            let s = storage.clone();
+            async move { s.upload(&key, b"data").await.unwrap(); }
+        })
+        .await;
 
-    // List with no limit (should get all 2500)
-    let keys = storage.list(&prefix, None).await?;
-    assert_eq!(keys.len(), 2500);
+    // List with limit 500 (within first page)
+    let listed = storage.list(&prefix, Some(500)).await?;
+    assert_eq!(listed.len(), 500);
 
-    // Cleanup
-    for key in keys {
-        storage.delete(&key).await?;
-    }
+    // List with limit 1025 (crosses page boundary)
+    let listed = storage.list(&prefix, Some(1025)).await?;
+    assert_eq!(listed.len(), 1025);
+
+    // List with no limit (should get all)
+    let listed = storage.list(&prefix, None).await?;
+    assert_eq!(listed.len(), count);
+
+    // Cleanup concurrently.
+    stream::iter(keys)
+        .for_each_concurrent(CONCURRENCY, |key| {
+            let s = storage.clone();
+            async move { s.delete(&key).await.unwrap(); }
+        })
+        .await;
 
     Ok(())
 }

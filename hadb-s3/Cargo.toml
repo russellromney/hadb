@@ -35,3 +35,4 @@ chrono = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 uuid = { workspace = true }
+futures = "0.3"
