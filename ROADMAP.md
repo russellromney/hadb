@@ -178,28 +178,6 @@ members = ["hadb", "hadb-io", "hadb-lease-s3"]
 
 ### Migration steps
 
-**Phase 1a: Create hadb-io + split hadb-s3 (hadb workspace)**
-1. Create `hadb-io/` crate in hadb workspace
-2. Move retry.rs from walrust-core → hadb-io (reconcile walrust/graphstream differences)
-3. Move s3.rs from walrust-core → hadb-io
-4. Move storage.rs from walrust-core → hadb-io (rename trait to ObjectStore)
-5. Absorb `hadb-s3/storage.rs` into hadb-io S3Backend
-6. Rename `hadb-s3/` → `hadb-lease-s3/` (keep only lease_store.rs + error.rs)
-7. Update workspace Cargo.toml: members = ["hadb", "hadb-io", "hadb-lease-s3"]
-8. Move webhook.rs from walrust → hadb-io (generalize events)
-9. Move retention.rs from walrust → hadb-io (already generic)
-10. Extract shared config types from walrust config.rs → hadb-io
-11. Build ConcurrentUploader<T> in hadb-io (generalize from walrust uploader)
-12. All hadb workspace tests pass
-
-**Phase 1b: Update walrust-core + walrust CLI**
-13. Update walrust-core: `use hadb_io::{RetryPolicy, ObjectStore, S3Backend}`
-14. Delete walrust-core's retry.rs, s3.rs, storage.rs
-15. Update walrust CLI: use hadb-io webhook/retention
-16. Delete walrust's webhook.rs, retention.rs
-17. Update walrust uploader to use ConcurrentUploader<LtxUploadItem>
-18. All walrust tests pass (unit + S3 integration)
-
 **Phase 1c: Update graphstream**
 19. Update graphstream: replace own retry.rs with `use hadb_io::RetryPolicy`
 20. Replace direct aws_sdk_s3 calls with `hadb_io::ObjectStore` trait
