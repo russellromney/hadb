@@ -451,3 +451,86 @@ async fn test_discover_replicas_no_registry() {
     let replicas = coordinator.discover_replicas("testdb").await.unwrap();
     assert!(replicas.is_empty());
 }
+
+// ============================================================================
+// Tests: database_names() and drain_all()
+// ============================================================================
+
+#[tokio::test]
+async fn test_database_names_empty() {
+    let config = CoordinatorConfig::default();
+    let (coordinator, _) = test_coordinator(None, config);
+
+    let names = coordinator.database_names().await;
+    assert!(names.is_empty());
+}
+
+#[tokio::test]
+async fn test_database_names_multiple() {
+    let config = CoordinatorConfig::default();
+    let (coordinator, _) = test_coordinator(None, config);
+
+    let db_path = PathBuf::from("/tmp/test.db");
+    coordinator.join("db_alpha", &db_path).await.unwrap();
+    coordinator.join("db_beta", &db_path).await.unwrap();
+    coordinator.join("db_gamma", &db_path).await.unwrap();
+
+    let mut names = coordinator.database_names().await;
+    names.sort();
+    assert_eq!(names, vec!["db_alpha", "db_beta", "db_gamma"]);
+}
+
+#[tokio::test]
+async fn test_drain_all_empty() {
+    let config = CoordinatorConfig::default();
+    let (coordinator, _) = test_coordinator(None, config);
+
+    let drained = coordinator.drain_all().await;
+    assert_eq!(drained, 0);
+    assert_eq!(coordinator.database_count().await, 0);
+}
+
+#[tokio::test]
+async fn test_drain_all_leaders() {
+    let config = CoordinatorConfig::default();
+    let (coordinator, replicator) = test_coordinator(None, config);
+
+    let db_path = PathBuf::from("/tmp/test.db");
+    coordinator.join("db1", &db_path).await.unwrap();
+    coordinator.join("db2", &db_path).await.unwrap();
+    coordinator.join("db3", &db_path).await.unwrap();
+
+    assert_eq!(coordinator.database_count().await, 3);
+
+    let drained = coordinator.drain_all().await;
+    assert_eq!(drained, 3);
+    assert_eq!(coordinator.database_count().await, 0);
+
+    // All databases should have been removed via replicator
+    let calls = replicator.calls();
+    assert!(calls.contains(&"remove(db1)".to_string()));
+    assert!(calls.contains(&"remove(db2)".to_string()));
+    assert!(calls.contains(&"remove(db3)".to_string()));
+}
+
+#[tokio::test]
+async fn test_drain_all_with_ha() {
+    let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+    let mut config = CoordinatorConfig::default();
+    config.lease = Some(LeaseConfig::new(
+        "instance-1".into(),
+        "127.0.0.1:8080".into(),
+    ));
+
+    let (coordinator, _) = test_coordinator(Some(lease_store), config);
+
+    let db_path = PathBuf::from("/tmp/test.db");
+    coordinator.join("ha_db1", &db_path).await.unwrap();
+    coordinator.join("ha_db2", &db_path).await.unwrap();
+
+    assert_eq!(coordinator.database_count().await, 2);
+
+    let drained = coordinator.drain_all().await;
+    assert_eq!(drained, 2);
+    assert_eq!(coordinator.database_count().await, 0);
+}

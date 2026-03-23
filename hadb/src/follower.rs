@@ -8,7 +8,7 @@
 //! part is `catchup_on_promotion` (e.g. walrust pull_incremental for SQLite).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,11 +16,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::{broadcast, watch, RwLock};
 
+use crate::coordinator::AtomicRole;
 use crate::lease::DbLease;
 use crate::metrics::HaMetrics;
 use crate::node_registry::NodeRegistry;
 use crate::traits::Replicator;
-use crate::types::{LeaseConfig, RoleEvent};
+use crate::types::{LeaseConfig, Role, RoleEvent};
 
 /// Follower behavior abstraction for database-specific replication.
 ///
@@ -90,7 +91,7 @@ pub struct LeaseMonitorContext {
     pub config: LeaseConfig,
     pub replicator_timeout: Duration,
     pub leader_address: Arc<RwLock<String>>,
-    pub role_ref: Arc<AtomicU8>,
+    pub(crate) role_ref: Arc<AtomicRole>,
     pub self_address: String,
     pub follower_position: Arc<AtomicU64>,
     pub cancel_rx: watch::Receiver<bool>,
@@ -273,7 +274,7 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                             }
 
                             // 5. Update shared role + address IMMEDIATELY.
-                            ctx.role_ref.store(0, Ordering::SeqCst); // 0 = Leader
+                            ctx.role_ref.store(Role::Leader);
                             *ctx.leader_address.write().await = ctx.self_address.clone();
 
                             // 6. Emit Promoted event.
@@ -297,7 +298,7 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                             ).await;
 
                             if demoted {
-                                ctx.role_ref.store(1, Ordering::SeqCst); // 1 = Follower
+                                ctx.role_ref.store(Role::Follower);
                             }
 
                             return Ok(true); // promoted

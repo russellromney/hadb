@@ -385,7 +385,7 @@ impl Coordinator {
                 config: lease_config.clone(),
                 replicator_timeout: self.config.replicator_timeout,
                 leader_address: leader_addr,
-                role_ref: Arc::new(AtomicU8::new(shared_role.load().to_u8())),
+                role_ref: shared_role.clone(),
                 self_address: lease_config.address.clone(),
                 follower_position: shared_position.clone(),
                 cancel_rx,
@@ -571,6 +571,35 @@ impl Coordinator {
     /// Number of databases currently managed.
     pub async fn database_count(&self) -> usize {
         self.databases.read().await.len()
+    }
+
+    /// List all managed database names.
+    pub async fn database_names(&self) -> Vec<String> {
+        self.databases.read().await.keys().cloned().collect()
+    }
+
+    /// Drain all databases — leave every database gracefully.
+    ///
+    /// For Leaders: final WAL sync + release lease.
+    /// For Followers: stop tailing + deregister.
+    ///
+    /// Returns the number of databases successfully drained.
+    pub async fn drain_all(&self) -> usize {
+        let names = self.database_names().await;
+        let total = names.len();
+        let mut drained = 0;
+        for name in &names {
+            match self.leave(name).await {
+                Ok(()) => {
+                    drained += 1;
+                }
+                Err(e) => {
+                    tracing::error!("drain_all: failed to leave '{}': {}", name, e);
+                }
+            }
+        }
+        tracing::info!("drain_all: {}/{} databases drained", drained, total);
+        drained
     }
 
     /// Graceful leader handoff — release leadership without leaving the cluster.
