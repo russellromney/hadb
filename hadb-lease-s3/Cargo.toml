@@ -1,12 +1,12 @@
 [package]
-name = "hadb-s3"
+name = "hadb-lease-s3"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "S3 reference implementation for hadb. LeaseStore and StorageBackend via S3."
-keywords = ["ha", "s3", "leader-election", "replication"]
+description = "S3 lease store and node registry for hadb coordination. CAS via S3 conditional PUTs."
+keywords = ["ha", "s3", "leader-election", "lease"]
 categories = ["database", "network-programming"]
 
 [dependencies]
