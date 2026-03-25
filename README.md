@@ -1,6 +1,8 @@
 # hadb: cheap HA embedded databases
 
-hadb aims to make any embedded database highly available via cloud storage, without having to write custom failover/restore logic. 
+> **Experimental.** hadb is under active development and not yet stable. APIs will change without notice.
+
+hadb aims to make any embedded database highly available via cloud storage, without having to write custom failover/restore logic.
 
 hadb's only high-level goal is high availability with better economics with multiple databases - not scaling or performance or single-database optimization.
 
