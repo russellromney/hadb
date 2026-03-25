@@ -1,0 +1,37 @@
+[package]
+name = "hadb-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared CLI framework for hadb database tools (haqlite, hakuzu, haduck, harock)."
+keywords = ["ha", "cli", "database", "s3"]
+categories = ["command-line-utilities", "database"]
+
+[dependencies]
+# CLI framework
+clap = { version = "4", features = ["derive", "env"] }
+
+# Config loading
+toml = "0.8"
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Shared S3/retry infrastructure
+hadb-io = { path = "../hadb-io" }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
