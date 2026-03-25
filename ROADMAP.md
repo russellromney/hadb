@@ -226,6 +226,69 @@ cd ~/Documents/Github/hakuzu
 
 ---
 
+## Phase Beacon: Follower Readiness in Coordinator
+
+> After: Phase 1 · Before: Phase 2
+
+**Atomicity: Phase Beacon MUST land simultaneously with hakuzu Phase Parity and haqlite Phase Rampart-e.** Beacon-c changes the `FollowerBehavior` trait signature, which breaks all implementors. All three repos update in one coordinated change.
+
+Every hadb database (haqlite, hakuzu, haduck) needs follower readiness: "has this follower replayed all available data?" Currently hakuzu reimplements this with `Arc<AtomicBool>` + `Arc<AtomicU64>` shared between `KuzuFollowerBehavior` and `HaKuzuInner` (`hakuzu/src/follower_behavior.rs:35-37`, `hakuzu/src/database.rs:354-357`). haqlite has no readiness tracking at all. Pushing this into hadb means every database gets it for free.
+
+### Beacon-a: Add `caught_up` to coordinator per-database state
+
+The coordinator already creates `shared_position: Arc<AtomicU64>` (`coordinator.rs:345`) and passes it to `FollowerBehavior::run_follower_loop()` (`follower.rs:52`). Add `caught_up: Arc<AtomicBool>` alongside it, same pattern.
+
+- Add `caught_up: Arc<AtomicBool>` field next to `follower_position` in `FollowerState` (coordinator.rs)
+- Pass to `run_follower_loop()` as new parameter (update `FollowerBehavior` trait in `follower.rs:45-55`)
+- Two writers to the same atomic:
+  - **Coordinator** sets `caught_up = true` on Promoted, `false` on Demoted/Fenced (extract from `hakuzu/src/database.rs:1030,1060,1067`)
+  - **Follower behavior** sets `caught_up` during poll loop (true when no new data, false when new data arrives, true after successful replay). This is the same pattern as `position`, which both coordinator and follower behavior already write to.
+- Change `Coordinator::join()` return type from `Result<Role>` to `Result<JoinResult>`:
+  ```rust
+  pub struct JoinResult {
+      pub role: Role,
+      pub caught_up: Arc<AtomicBool>,
+      pub position: Arc<AtomicU64>,
+  }
+  ```
+  Database layers cache these Arc refs in their inner struct for zero-overhead health checks (single atomic load) instead of locking the coordinator's `HashMap<String, DbEntry>` RwLock on every read. This avoids a performance regression on the health check hot path.
+
+Source: `hakuzu/src/database.rs:682-693` (is_caught_up/replay_position), `hakuzu/src/follower_behavior.rs:112,116,156` (caught_up state transitions)
+
+### Beacon-b: Add readiness gauges to HaMetrics
+
+Extract from `hakuzu/src/database.rs:703-717` (prometheus_metrics readiness section). Add two gauges to `HaMetrics` (`metrics.rs`):
+
+- `follower_caught_up: AtomicU64` (1 = caught up, 0 = behind)
+- `follower_replay_position: AtomicU64`
+- Add to `MetricsSnapshot` and `to_prometheus()` output
+- Coordinator updates these atomics when `caught_up` / `position` change
+
+Caveat: `HaMetrics` is a single global struct per coordinator. With multiple databases on one coordinator, these gauges report last-written values. Per-database prometheus labels would require per-db metrics structs, which is out of scope. This matches the existing limitation on `follower_pulls_succeeded/failed/no_new_data` counters, which are already global.
+
+Source: `hakuzu/src/database.rs:703-717`
+
+### Beacon-c: Update FollowerBehavior trait (BREAKING)
+
+Add `caught_up: Arc<AtomicBool>` parameter to `run_follower_loop()` signature (`follower.rs:45-55`). This is a **breaking trait change** requiring simultaneous updates to all implementors:
+
+- `hakuzu/src/follower_behavior.rs` — delete own `caught_up` field, repoint `self.caught_up.store(...)` calls to use the trait parameter `caught_up.store(...)` instead. The stores are not deleted, they are repointed from a self-owned atomic to the coordinator-owned atomic.
+- `haqlite/src/follower_behavior.rs` — add `caught_up.store(true/false)` at the same points as hakuzu (empty poll = true, new data downloaded = false, replay success = true). Currently has no readiness tracking at all.
+
+Source: `hakuzu/src/follower_behavior.rs:109-157` (the complete caught_up state machine to replicate in haqlite and to repoint in hakuzu)
+
+### Beacon-d: Tests
+
+- Coordinator test: follower starts not-caught-up, becomes caught-up after successful pull
+- Coordinator test: promoted node is always caught-up
+- Coordinator test: demoted/fenced node is not-caught-up
+- Coordinator test: `JoinResult` contains valid Arc refs that reflect follower state changes
+- Metrics test: readiness gauges appear in prometheus output
+- Update existing coordinator_test.rs MockFollowerBehavior to accept new `caught_up` param
+- Update all callers of `Coordinator::join()` to destructure `JoinResult` instead of bare `Role`
+
+---
+
 ## Phase 2: haqlite CLI
 
 After hadb-io extraction, haqlite gets a full CLI. See haqlite/ROADMAP.md.
