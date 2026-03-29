@@ -226,6 +226,82 @@ cd ~/Documents/Github/hakuzu
 
 ---
 
+## Future: Separating Replication Concerns
+
+Today, haqlite bundles everything: lease management, WAL sync, snapshots, restore. The future architecture separates these into distinct, composable concerns behind hadb traits.
+
+### LeaseStore (today: S3, future: NATS/Redis/etcd/Consul/DynamoDB/Postgres)
+
+Already abstracted. `LeaseStore` trait with S3 and in-memory implementations. Next implementation: **NATS JetStream KV** (2-5ms CAS vs S3's 50-200ms). Single NATS node first (~$2/month), cluster for HA when needed. S3 charges per request ($17/month at 1000 databases polling every 2s); NATS has zero per-request cost. See `hadb-nats-lease` and other variants in README.
+
+### ReplicationTransport (future: Kafka/Redpanda)
+
+New trait for real-time WAL frame delivery. Today, followers poll S3 every 1-10s (1-10s RPO). With a `ReplicationTransport`, the leader publishes WAL frames to a durable stream (Redpanda topic `wal.{db_name}`), and followers consume and apply immediately (~5ms behind leader). RPO drops to near-zero.
+
+The write path changes: write arrives at engine, engine publishes WAL frame to Redpanda (durable ack across 3 Raft nodes, 2-5ms), then engine applies to local SQLite. The write is durable in Redpanda before SQLite touches it. If the leader crashes after Redpanda ack but before SQLite apply, followers already have the write from the stream.
+
+NATS JetStream works for small scale but doesn't handle thousands of topics well. Redpanda (single binary, Kafka-compatible) is the right choice at scale.
+
+```rust
+// Not designed yet, conceptual
+#[async_trait]
+pub trait ReplicationTransport: Send + Sync {
+    async fn publish_wal_frame(&self, db_name: &str, frame: &[u8]) -> Result<u64>; // returns offset
+    async fn subscribe(&self, db_name: &str, from_offset: u64) -> Result<FrameStream>;
+    async fn latest_offset(&self, db_name: &str) -> Result<u64>;
+}
+```
+
+### ReplicationCompactor (future: batch writer)
+
+A consumer that reads WAL frames from the hot stream (Redpanda), batches and compacts them, and uploads to S3 as the cold archive. Decouples real-time replication speed from durable archival.
+
+- Redpanda retention stays short (24h). S3 holds the full compacted history.
+- Tracks last-compacted Kafka offset per database.
+- Runs as a background task in the engine or as a standalone process.
+- `StorageBackend` (S3) role changes from "primary replication target" to "cold archive written by the compactor." Leader no longer uploads WAL frames to S3 directly.
+
+### Restore (two-phase)
+
+Restore becomes: fetch latest S3 snapshot (compacted history), then replay Redpanda from the snapshot's Kafka offset forward (recent uncompacted frames). No gaps. If Redpanda retention has expired for older data, S3 has it.
+
+### CDC for free
+
+Any consumer subscribes to `wal.{db_name}` on Redpanda and gets every write in real-time. That's `hadb-stream` with zero additional code. Webhooks, event sourcing, cross-region fanout.
+
+### What this means for the dependency graph
+
+```
+hadb                    -- core traits (LeaseStore, Replicator, Executor, StorageBackend)
+                           + new: ReplicationTransport trait
+
+hadb-io                 -- shared S3/retry/upload infrastructure (Phase 1)
+
+hadb-lease-s3           -- S3 LeaseStore (today)
+hadb-lease-nats         -- NATS JetStream KV LeaseStore (next)
+hadb-lease-redis        -- Redis LeaseStore (future)
+hadb-lease-etcd         -- etcd LeaseStore (future)
+hadb-lease-consul       -- Consul LeaseStore (future)
+hadb-lease-dynamo       -- DynamoDB LeaseStore (future)
+hadb-lease-pg           -- PostgreSQL LeaseStore (future)
+
+hadb-transport-redpanda -- Redpanda/Kafka ReplicationTransport (future)
+
+hadb-stream             -- CDC consumer on ReplicationTransport (future)
+```
+
+### Build order
+
+None of this is being built now. The order when it matters:
+
+1. **NATS lease store** -- biggest bang for buck. Faster failover, zero per-request cost.
+2. **Redpanda ReplicationTransport** -- when zero-RPO matters to paying customers.
+3. **ReplicationCompactor** -- required alongside #2 to keep S3 as cold archive.
+4. **hadb-stream (CDC)** -- falls out for free once #2 exists.
+5. **Other lease stores** -- on demand based on deployment environments.
+
+---
+
 ## Phase Beacon: Follower Readiness in Coordinator
 
 > After: Phase 1 · Before: Phase 2
