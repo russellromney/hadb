@@ -1,0 +1,19 @@
+[package]
+name = "hadb-nats"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NATS JetStream KV lease store for hadb"
+
+[dependencies]
+hadb = { path = "../hadb" }
+async-nats = "0.46"
+async-trait.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+bytes = "1"
+
+[dev-dependencies]
+uuid.workspace = true
