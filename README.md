@@ -119,7 +119,7 @@ Built on ideas from [Litestream](https://litestream.io/) and [LiteFS](https://fl
 
 ### Fast lease stores
 
-S3 conditional PUTs work but have ~50-200ms latency per operation and charge per request. At scale (1000 databases, lease check every 2s), that's about $17/month just for lease polling, growing linearly with engines and databases. For faster failover and zero per-request cost, swap the `LeaseStore` implementation. S3 remains the storage backend for durability; these are just the fast path for coordination. Start with a single NATS node (about $2/month), cluster when you have real customers.
+S3 conditional PUTs work but have ~50-200ms latency per operation and charge per request. At scale (1000 databases, lease check every 2s), that's about $17/month just for lease polling, growing linearly with engines and databases. For faster failover and zero per-request cost, swap the `LeaseStore` implementation. S3 remains the storage backend for durability; these are just the fast path for coordination. Start with a single NATS node (about $2/month), cluster for HA.
 
 **hadb-nats-lease** -- NATS JetStream KV with CAS for leader election. 2-5ms per operation. Lightweight self-hosted Raft (single binary, ~30MB RAM per node). Recommended fast path. Start with 1 node, add 2 more for HA when needed.
 
@@ -139,9 +139,9 @@ Today, replication is S3 polling (1-10s RPO). For real-time replication, publish
 
 ### Other future crates
 
-**hadb-fly** -- Fly.io native HA. Uses `.internal` DNS for node discovery. Tigris for S3. Any hadb database works on Fly with zero config changes.
+**hadb-fly-lease** -- Fly.io native HA. Uses `.internal` DNS for node discovery. Tigris for S3. Any hadb database works on Fly with zero config changes.
 
-**hadb-stream** -- CDC from the replication log. With Kafka/Redpanda streaming, every write is a subscribable event. Webhooks, event sourcing, cross-region fanout.
+**hadb-XXX-replicator-transport** -- CDC from the replication log. With Kafka/Redpanda streaming, every write is a subscribable event. Webhooks, event sourcing, cross-region fanout. Also, can do hadb-XXX-replicator-batcher to get per-WAL-write durability with efficient batching to a hadb-replicator-storage
 
 **hadb-proxy** -- Smart read/write routing. Routes writes to leader, reads to nearest replica. For apps that can't embed hadb directly.
 
