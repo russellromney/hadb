@@ -115,23 +115,49 @@ Shared infrastructure (S3 client, retry/circuit breaker, concurrent uploads, web
 
 Built on ideas from [Litestream](https://litestream.io/) and [LiteFS](https://fly.io/blog/introducing-litefs/) by [Ben Johnson](https://github.com/benbjohnson). Litestream proved that S3 replication works for SQLite; LiteFS proved that transparent leader election and read replicas work at the edge. hadb aims to generalize both ideas to any embedded database, as an embedded library.
 
+## Crate naming convention
+
+hadb crates follow the pattern `hadb-{role}-{backend}` where the role maps to a trait:
+
+| Pattern | Trait | What it does | Examples |
+|---------|-------|-------------|----------|
+| `hadb-lease-{backend}` | `LeaseStore` | Leader election via CAS | hadb-lease-s3, hadb-lease-nats, hadb-lease-redis |
+| `hadb-storage-{backend}` | `StorageBackend` | Coordination blob storage | hadb-storage-s3 (in hadb-lease-s3 today) |
+| `hadb-transport-{backend}` | `ReplicationTransport` (future) | Real-time WAL streaming | hadb-transport-redpanda |
+| `hadb-stream-{backend}` | (consumer) | CDC from replication log | hadb-stream-redpanda |
+
+Core crates without a backend suffix are trait-only or shared infrastructure:
+
+| Crate | What it does |
+|-------|-------------|
+| `hadb` | Core traits + coordinator. Zero cloud dependencies. |
+| `hadb-io` | Shared S3 client, retry, concurrent uploads, webhooks, retention. |
+| `hadb-cli` | Shared CLI framework (args, config, commands). |
+
+Database-specific crates live in their own repos and compose hadb layers:
+
+| Crate | Database | Replicator |
+|-------|----------|-----------|
+| `haqlite` | SQLite | walrust (WAL shipping) |
+| `hakuzu` | Kuzu/LadybugDB | graphstream (journal shipping) |
+
 ## Future directions
 
 ### Fast lease stores
 
 S3 conditional PUTs work but have ~50-200ms latency per operation and charge per request. At scale (1000 databases, lease check every 2s), that's about $17/month just for lease polling, growing linearly with engines and databases. For faster failover and zero per-request cost, swap the `LeaseStore` implementation. S3 remains the storage backend for durability; these are just the fast path for coordination. Start with a single NATS node (about $2/month), cluster for HA.
 
-**hadb-nats-lease** -- NATS JetStream KV with CAS for leader election. 2-5ms per operation. Lightweight self-hosted Raft (single binary, ~30MB RAM per node). Recommended fast path. Start with 1 node, add 2 more for HA when needed.
+**hadb-lease-nats** ([crates.io](https://crates.io/crates/hadb-lease-nats)) -- NATS JetStream KV with CAS for leader election. 2-5ms per operation. Lightweight self-hosted Raft (single binary, ~30MB RAM per node). Recommended fast path. Start with 1 node, add 2 more for HA when needed.
 
-**hadb-redis-lease** -- Redis `SET NX PX` for acquire, Lua scripts for atomic renew/release. 1-5ms per operation. Managed options everywhere (Upstash, ElastiCache, Aiven). Needs Redis HA (Sentinel or managed) to avoid being a SPOF; fall back to S3 lease if Redis is unreachable.
+**hadb-lease-redis** (future) -- Redis `SET NX PX` for acquire, Lua scripts for atomic renew/release. 1-5ms per operation. Managed options everywhere (Upstash, ElastiCache, Aiven). Needs Redis HA (Sentinel or managed) to avoid being a SPOF; fall back to S3 lease if Redis is unreachable.
 
-**hadb-etcd-lease** -- etcd native leases with KeepAlive. 2-5ms per operation. Purpose-built for distributed coordination (Kubernetes uses it). Best for teams already running Kubernetes.
+**hadb-lease-etcd** (future) -- etcd native leases with KeepAlive. 2-5ms per operation. Purpose-built for distributed coordination (Kubernetes uses it). Best for teams already running Kubernetes.
 
-**hadb-consul-lease** -- Consul sessions + KV store. Proven pattern (LiteFS used this). Best for HashiCorp ecosystem deployments.
+**hadb-lease-consul** (future) -- Consul sessions + KV store. Proven pattern (LiteFS used this). Best for HashiCorp ecosystem deployments.
 
-**hadb-dynamo-lease** -- DynamoDB conditional writes (`PutItem` with `attribute_not_exists`). 5-10ms per operation. AWS-managed, zero ops, serverless pricing.
+**hadb-lease-dynamo** (future) -- DynamoDB conditional writes (`PutItem` with `attribute_not_exists`). 5-10ms per operation. AWS-managed, zero ops, serverless pricing.
 
-**hadb-pg-lease** -- PostgreSQL advisory locks or `SELECT FOR UPDATE` with conditional writes. 5-20ms per operation. The "you already have Postgres" option.
+**hadb-lease-pg** (future) -- PostgreSQL advisory locks or `SELECT FOR UPDATE` with conditional writes. 5-20ms per operation. The "you already have Postgres" option.
 
 ### WAL streaming (Kafka/Redpanda)
 
@@ -139,11 +165,13 @@ Today, replication is S3 polling (1-10s RPO). For real-time replication, publish
 
 ### Other future crates
 
-**hadb-fly-lease** -- Fly.io native HA. Uses `.internal` DNS for node discovery. Tigris for S3. Any hadb database works on Fly with zero config changes.
+**hadb-lease-fly** (future) -- Fly.io native HA. Uses `.internal` DNS for node discovery. Tigris for S3. Any hadb database works on Fly with zero config changes.
 
-**hadb-XXX-replicator-transport** -- CDC from the replication log. With Kafka/Redpanda streaming, every write is a subscribable event. Webhooks, event sourcing, cross-region fanout. Also, can do hadb-XXX-replicator-batcher to get per-WAL-write durability with efficient batching to a hadb-replicator-storage
+**hadb-transport-redpanda** (future) -- Real-time WAL frame delivery via Redpanda/Kafka topics. Implements `ReplicationTransport` trait.
 
-**hadb-proxy** -- Smart read/write routing. Routes writes to leader, reads to nearest replica. For apps that can't embed hadb directly.
+**hadb-stream-redpanda** (future) -- CDC consumer on the WAL topic. Webhooks, event sourcing, cross-region fanout.
+
+**hadb-proxy** (future) -- Smart read/write routing. Routes writes to leader, reads to nearest replica. For apps that can't embed hadb directly.
 
 ## License
 
