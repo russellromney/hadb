@@ -294,11 +294,95 @@ hadb-stream             -- CDC consumer on ReplicationTransport (future)
 
 None of this is being built now. The order when it matters:
 
-1. **NATS lease store** -- biggest bang for buck. Faster failover, zero per-request cost.
-2. **Redpanda ReplicationTransport** -- when zero-RPO matters to paying customers.
-3. **ReplicationCompactor** -- required alongside #2 to keep S3 as cold archive.
-4. **hadb-stream (CDC)** -- falls out for free once #2 exists.
-5. **Other lease stores** -- on demand based on deployment environments.
+1. **HaNode (engine-level HA)** -- biggest architectural win. Eliminates N leases per process.
+2. **NATS lease store** -- faster failover, zero per-request cost.
+3. **Self-organizing replicas** -- engines bid for work, no external orchestrator needed.
+4. **Redpanda ReplicationTransport** -- when zero-RPO matters to paying customers.
+5. **ReplicationCompactor** -- required alongside #4 to keep S3 as cold archive.
+6. **hadb-stream (CDC)** -- falls out for free once #4 exists.
+7. **Other lease stores** -- on demand based on deployment environments.
+
+---
+
+## Future: HaNode (Engine-Level HA + Self-Organizing Replicas)
+
+Today, hadb's `Coordinator` manages HA per-database: each database has its own lease, sync loop, and follower poll. This works for the embedded use case (one app, one database). But for multi-tenant platforms (one process, many databases), it doesn't scale. 1000 databases = 1000 independent lease operations.
+
+### HaNode: one lease per process
+
+`HaNode` owns a single lease for the entire process and manages many databases. WAL replication is still per-database (each database has its own WAL). Coordination (who is leader, fencing) is per-process.
+
+```rust
+// Per-database (today, still works for embedded use case)
+let coordinator = Coordinator::new(replicator, executor, lease_store, storage, config);
+coordinator.join("mydb", path).await?;
+
+// Per-process (new, for multi-tenant platforms)
+let node = HaNode::new(lease_store, storage, config)
+    .with_id("engine-A")
+    .with_address("10.0.0.1:6379")
+    .await?;
+
+// Add databases. Each gets a Replicator, but no individual lease.
+node.add("db-1", path1, replicator1).await?;
+node.add("db-2", path2, replicator2).await?;
+// ... up to thousands
+
+// One lease renewal, not thousands.
+// Role change = all databases transition at once.
+```
+
+### Self-organizing replica placement
+
+Nodes discover each other via the lease store's node registry (already exists in hadb-lease-s3). Each node writes its state: id, version, capacity, database list. Nodes read the registry, see which databases need replicas, and bid for work based on spare capacity. No external orchestrator required.
+
+```
+Node A starts:
+  - Writes to registry: {id: "A", cpus: 8, ram_gb: 32, databases: ["db-1", "db-2", ...]}
+  - For each database, checks: "does this have a replica?"
+
+Node B starts:
+  - Reads registry. Sees A's databases need replicas. B has spare capacity.
+  - Claims via CAS: "I'll replicate db-1, db-7, db-23"
+  - Starts pulling WAL for those databases
+
+Node C starts:
+  - Sees some claimed by B. Claims unclaimed ones based on its own capacity.
+```
+
+**Constraints enforced by the placement algorithm:**
+- Never colocate primary + replica on the same node
+- Only replicate to nodes running a compatible version
+- CAS prevents two nodes from claiming the same replica slot
+- Claims have TTL: if a node dies, its claims expire, other nodes bid for the work
+
+**Failover is distributed:** Node A dies. Nodes B, C, D each have some of A's databases. They promote independently. No single node takes all the failover load.
+
+**Custom placement:** Applications can override the default placement with their own logic (e.g., a control plane that assigns replicas based on business rules).
+
+```rust
+// Default: hadb's built-in placement (capacity-weighted bidding)
+let node = HaNode::new(lease_store, storage, config).await?;
+
+// Custom: application controls placement
+let node = HaNode::new(lease_store, storage, config)
+    .with_placement(MyControlPlanePlacement::new(cp_client))
+    .await?;
+```
+
+### Read replicas for free
+
+A follower replicating a database is simultaneously an HA standby and a read replica. The difference is just routing. hadb tracks roles and replication state. The application decides whether to route reads to followers.
+
+This is application-level, not hadb-level. hadb provides:
+- Per-database role tracking (`Role::Leader` / `Role::Follower`)
+- Replication lag / caught-up state (Phase Beacon)
+- `RoleEvent` broadcast for role changes
+
+The application provides:
+- Routing logic (proxy, SDK, DNS)
+- Read preference configuration
+- Stale read tolerance
 
 ---
 
