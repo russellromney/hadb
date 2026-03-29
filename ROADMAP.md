@@ -226,13 +226,52 @@ cd ~/Documents/Github/hakuzu
 
 ---
 
+## Phase Volt: NATS JetStream KV Lease Store
+
+> After: Phase 1 · Before: Phase Beacon
+
+NATS JetStream KV as an alternative LeaseStore implementation. S3 leases are 50-200ms per operation and cost $17/month at 1000 databases polling every 2s. NATS KV is 2-5ms per operation with zero per-request cost on a single $2/month Fly machine.
+
+### Volt-a: hadb-nats crate (DONE)
+
+New crate `hadb-nats/` in the hadb workspace. Implements `LeaseStore` trait using NATS JetStream KV.
+
+- `NatsLeaseStore::connect(url, bucket)` convenience constructor (connects + creates/opens KV bucket)
+- `NatsLeaseStore::new(store)` for pre-built KV store handle
+- `read` -> `store.entry(key)`, revision as etag string. Deleted/purged entries return None.
+- `write_if_not_exists` -> `store.create(key, data)`, `CreateErrorKind::AlreadyExists` = CAS conflict
+- `write_if_match` -> `store.update(key, data, revision)`, `UpdateErrorKind::WrongLastRevision` = CAS conflict
+- `delete` -> `store.purge(key)`, idempotent (hard delete, no history)
+- KV bucket config: history=1 (only latest value matters for leases)
+
+Source: `hadb-lease-s3/src/lease_store.rs` (same trait, different backend)
+
+### Volt-b: Tests
+
+10 tests against real NATS (gated by NATS_URL env var):
+- read nonexistent, create+read, create conflict, update CAS success/failure, stale revision, delete+read, delete idempotent, delete-then-create, etag is numeric revision
+
+### Volt-c: Engine integration (not started)
+
+- haqlite: accept `NatsLeaseStore` via `WAL_LEASE_NATS_URL` env var in `WalReplicationManager`
+- Fallback: if NATS is unreachable, engines fall back to S3 leases (already battle-tested)
+
+### What NATS is NOT doing
+
+- NOT replacing S3 for WAL storage/replication (walrust stays on S3)
+- NOT doing WAL streaming (future: Redpanda/Kafka for thousands of topics at high throughput)
+- NOT a message bus between engines
+- NOT the batch compactor
+
+---
+
 ## Future: Separating Replication Concerns
 
 Today, haqlite bundles everything: lease management, WAL sync, snapshots, restore. The future architecture separates these into distinct, composable concerns behind hadb traits.
 
-### LeaseStore (today: S3, future: NATS/Redis/etcd/Consul/DynamoDB/Postgres)
+### LeaseStore (today: S3 + NATS, future: Redis/etcd/Consul/DynamoDB/Postgres)
 
-Already abstracted. `LeaseStore` trait with S3 and in-memory implementations. Next implementation: **NATS JetStream KV** (2-5ms CAS vs S3's 50-200ms). Single NATS node first (~$2/month), cluster for HA when needed. S3 charges per request ($17/month at 1000 databases polling every 2s); NATS has zero per-request cost. See `hadb-nats-lease` and other variants in README.
+Already abstracted. `LeaseStore` trait with S3, NATS, and in-memory implementations. NATS JetStream KV is implemented in Phase Volt (2-5ms CAS vs S3's 50-200ms). Single NATS node first (~$2/month), cluster for HA when needed.
 
 ### ReplicationTransport (future: Kafka/Redpanda)
 
@@ -278,7 +317,7 @@ hadb                    -- core traits (LeaseStore, Replicator, Executor, Storag
 hadb-io                 -- shared S3/retry/upload infrastructure (Phase 1)
 
 hadb-lease-s3           -- S3 LeaseStore (today)
-hadb-lease-nats         -- NATS JetStream KV LeaseStore (next)
+hadb-nats               -- NATS JetStream KV LeaseStore (Phase Volt, done)
 hadb-lease-redis        -- Redis LeaseStore (future)
 hadb-lease-etcd         -- etcd LeaseStore (future)
 hadb-lease-consul       -- Consul LeaseStore (future)
@@ -292,10 +331,8 @@ hadb-stream             -- CDC consumer on ReplicationTransport (future)
 
 ### Build order
 
-None of this is being built now. The order when it matters:
-
-1. **HaNode (engine-level HA)** -- biggest architectural win. Eliminates N leases per process.
-2. **NATS lease store** -- faster failover, zero per-request cost.
+1. **NATS lease store** -- DONE (Phase Volt). Faster failover, zero per-request cost.
+2. **HaNode (engine-level HA)** -- biggest architectural win. Eliminates N leases per process.
 3. **Self-organizing replicas** -- engines bid for work, no external orchestrator needed.
 4. **Redpanda ReplicationTransport** -- when zero-RPO matters to paying customers.
 5. **ReplicationCompactor** -- required alongside #4 to keep S3 as cold archive.
@@ -388,7 +425,7 @@ The application provides:
 
 ## Phase Beacon: Follower Readiness in Coordinator
 
-> After: Phase 1 · Before: Phase 2
+> After: Phase Volt · Before: Phase 2
 
 **Atomicity: Phase Beacon MUST land simultaneously with hakuzu Phase Parity and haqlite Phase Rampart-e.** Beacon-c changes the `FollowerBehavior` trait signature, which breaks all implementors. All three repos update in one coordinated change.
 
