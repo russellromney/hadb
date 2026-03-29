@@ -1,4 +1,4 @@
-//! hadb-nats: NATS JetStream KV lease store for hadb.
+//! hadb-lease-nats: NATS JetStream KV lease store for hadb.
 //!
 //! Provides a NATS-backed implementation of hadb's `LeaseStore` trait
 //! using JetStream Key-Value buckets for compare-and-swap leader election.
@@ -8,7 +8,7 @@
 //! lease operations per second.
 //!
 //! ```ignore
-//! use hadb_nats::NatsLeaseStore;
+//! use hadb_lease_nats::NatsLeaseStore;
 //!
 //! let lease_store = NatsLeaseStore::connect("nats://localhost:4222", "hadb-leases").await?;
 //! ```

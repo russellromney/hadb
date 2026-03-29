@@ -232,9 +232,9 @@ cd ~/Documents/Github/hakuzu
 
 NATS JetStream KV as an alternative LeaseStore implementation. S3 leases are 50-200ms per operation and cost $17/month at 1000 databases polling every 2s. NATS KV is 2-5ms per operation with zero per-request cost on a single $2/month Fly machine.
 
-### Volt-a: hadb-nats crate (DONE)
+### Volt-a: hadb-lease-nats crate (DONE)
 
-New crate `hadb-nats/` in the hadb workspace. Implements `LeaseStore` trait using NATS JetStream KV.
+New crate `hadb-lease-nats/` in the hadb workspace. Implements `LeaseStore` trait using NATS JetStream KV.
 
 - `NatsLeaseStore::connect(url, bucket)` convenience constructor (connects + creates/opens KV bucket)
 - `NatsLeaseStore::new(store)` for pre-built KV store handle
@@ -317,7 +317,7 @@ hadb                    -- core traits (LeaseStore, Replicator, Executor, Storag
 hadb-io                 -- shared S3/retry/upload infrastructure (Phase 1)
 
 hadb-lease-s3           -- S3 LeaseStore (today)
-hadb-nats               -- NATS JetStream KV LeaseStore (Phase Volt, done)
+hadb-lease-nats               -- NATS JetStream KV LeaseStore (Phase Volt, done)
 hadb-lease-redis        -- Redis LeaseStore (future)
 hadb-lease-etcd         -- etcd LeaseStore (future)
 hadb-lease-consul       -- Consul LeaseStore (future)
