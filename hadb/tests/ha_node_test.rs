@@ -105,6 +105,7 @@ impl FollowerBehavior for TrackingFollowerBehavior {
         _db_path: &PathBuf,
         _poll_interval: Duration,
         _position: Arc<AtomicU64>,
+        _caught_up: Arc<std::sync::atomic::AtomicBool>,
         mut cancel_rx: watch::Receiver<bool>,
         _metrics: Arc<HaMetrics>,
     ) -> Result<()> {
@@ -136,6 +137,7 @@ impl FollowerBehavior for MockFollowerBehavior {
         _db_path: &PathBuf,
         _poll_interval: Duration,
         _position: Arc<AtomicU64>,
+        _caught_up: Arc<std::sync::atomic::AtomicBool>,
         mut cancel_rx: watch::Receiver<bool>,
         _metrics: Arc<HaMetrics>,
     ) -> Result<()> {

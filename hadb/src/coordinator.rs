@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -40,6 +40,17 @@ impl AtomicRole {
     }
 }
 
+/// Result of joining a database to the coordinator.
+///
+/// Contains Arc refs to the coordinator's per-database atomics. Database layers
+/// cache these for zero-overhead health checks (single atomic load, no locks).
+#[derive(Debug)]
+pub struct JoinResult {
+    pub role: Role,
+    pub caught_up: Arc<AtomicBool>,
+    pub position: Arc<AtomicU64>,
+}
+
 /// Per-database entry in the coordinator.
 struct DbEntry {
     role: Arc<AtomicRole>,
@@ -48,6 +59,8 @@ struct DbEntry {
     task_handle: JoinHandle<()>,
     /// Path to the database file. Stored for promote/demote cycles (HaNode).
     db_path: PathBuf,
+    caught_up: Arc<AtomicBool>,
+    position: Arc<AtomicU64>,
 }
 
 /// HA coordinator.
@@ -102,7 +115,7 @@ impl Coordinator {
     ///
     /// If leases are enabled: claims the lease -> Leader, or follows -> Follower.
     /// If leases are disabled: starts leader sync -> always Leader.
-    pub async fn join(self: &Arc<Self>, name: &str, db_path: &Path) -> Result<Role> {
+    pub async fn join(self: &Arc<Self>, name: &str, db_path: &Path) -> Result<JoinResult> {
         let lease_store = match &self.lease_store {
             Some(ls) => ls.clone(),
             None => {
@@ -121,6 +134,8 @@ impl Coordinator {
                 })??;
 
                 let (cancel_tx, _) = watch::channel(false);
+                let caught_up = Arc::new(AtomicBool::new(true));
+                let position = Arc::new(AtomicU64::new(0));
                 self.databases.write().await.insert(
                     name.to_string(),
                     DbEntry {
@@ -129,6 +144,8 @@ impl Coordinator {
                         cancel_tx,
                         task_handle: tokio::spawn(async {}),
                         db_path: db_path.to_path_buf(),
+                        caught_up: caught_up.clone(),
+                        position: position.clone(),
                     },
                 );
                 let _ = self.role_tx.send(RoleEvent::Joined {
@@ -136,7 +153,7 @@ impl Coordinator {
                     role: Role::Leader,
                 });
                 tracing::info!("Coordinator: '{}' joined as Leader (no HA)", name);
-                return Ok(Role::Leader);
+                return Ok(JoinResult { role: Role::Leader, caught_up, position });
             }
         };
 
@@ -230,6 +247,8 @@ impl Coordinator {
                     }
                 });
 
+                let leader_caught_up = Arc::new(AtomicBool::new(true));
+                let leader_position = Arc::new(AtomicU64::new(0));
                 self.databases.write().await.insert(
                     name.to_string(),
                     DbEntry {
@@ -238,6 +257,8 @@ impl Coordinator {
                         cancel_tx,
                         task_handle,
                         db_path: db_path.to_path_buf(),
+                        caught_up: leader_caught_up.clone(),
+                        position: leader_position.clone(),
                     },
                 );
 
@@ -246,7 +267,7 @@ impl Coordinator {
                     role: Role::Leader,
                 });
                 tracing::info!("Coordinator: '{}' joined as Leader", name);
-                Ok(Role::Leader)
+                Ok(JoinResult { role: Role::Leader, caught_up: leader_caught_up, position: leader_position })
             }
             Role::Follower => {
                 // Restore from storage to get a base snapshot.
@@ -285,11 +306,18 @@ impl Coordinator {
 
                 let (follower_stop_tx, follower_stop_rx) = watch::channel(false);
 
+                // Create shared atomics here so DbEntry, run_follower_tasks, and JoinResult
+                // all share the same Arc refs.
+                let follower_position = Arc::new(AtomicU64::new(0));
+                let follower_caught_up = Arc::new(AtomicBool::new(false));
+
                 let self_clone = self.clone();
                 let db_name = name.to_string();
                 let db_path_buf = db_path.to_path_buf();
                 let role_for_entry = shared_role.clone();
                 let addr_for_entry = leader_addr.clone();
+                let pos_for_tasks = follower_position.clone();
+                let cu_for_tasks = follower_caught_up.clone();
 
                 let task_handle = tokio::spawn(async move {
                     self_clone
@@ -302,6 +330,8 @@ impl Coordinator {
                             follower_stop_tx,
                             follower_stop_rx,
                             cancel_rx,
+                            pos_for_tasks,
+                            cu_for_tasks,
                         )
                         .await;
                 });
@@ -314,6 +344,8 @@ impl Coordinator {
                         cancel_tx,
                         task_handle,
                         db_path: db_path.to_path_buf(),
+                        caught_up: follower_caught_up.clone(),
+                        position: follower_position.clone(),
                     },
                 );
 
@@ -322,7 +354,7 @@ impl Coordinator {
                     role: Role::Follower,
                 });
                 tracing::info!("Coordinator: '{}' joined as Follower", name);
-                Ok(Role::Follower)
+                Ok(JoinResult { role: Role::Follower, caught_up: follower_caught_up, position: follower_position })
             }
         }
     }
@@ -338,16 +370,14 @@ impl Coordinator {
         follower_stop_tx: watch::Sender<bool>,
         follower_stop_rx: watch::Receiver<bool>,
         cancel_rx: watch::Receiver<bool>,
+        shared_position: Arc<AtomicU64>,
+        shared_caught_up: Arc<AtomicBool>,
     ) {
         let lease_config = self
             .config
             .lease
             .as_ref()
             .expect("lease must be present");
-
-        // Shared position between pull loop and monitor.
-        // Pull loop updates it atomically; monitor reads it for warm promotion.
-        let shared_position = Arc::new(AtomicU64::new(0));
 
         // Spawn follower pull loop
         let follower_handle = {
@@ -359,6 +389,7 @@ impl Coordinator {
             let pull_interval = self.config.follower_pull_interval;
             let metrics = self.metrics.clone();
             let position = shared_position.clone();
+            let caught_up = shared_caught_up.clone();
 
             tokio::spawn(async move {
                 let _ = behavior
@@ -369,6 +400,7 @@ impl Coordinator {
                         &db_path_clone,
                         pull_interval,
                         position,
+                        caught_up,
                         follower_stop_rx,
                         metrics,
                     )
@@ -393,6 +425,7 @@ impl Coordinator {
                 role_ref: shared_role.clone(),
                 self_address: lease_config.address.clone(),
                 follower_position: shared_position.clone(),
+                follower_caught_up: shared_caught_up.clone(),
                 cancel_rx,
                 node_registry: self.node_registry.clone(),
                 metrics: self.metrics.clone(),

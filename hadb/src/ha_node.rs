@@ -14,7 +14,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -391,6 +391,7 @@ impl HaNode {
         let db_path = db_path.to_path_buf();
         let poll_interval = self.config.follower_poll_interval;
         let position = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let caught_up = Arc::new(AtomicBool::new(false));
         let metrics = self.coordinator.metrics().clone();
 
         // Create a cancel channel tied to the coordinator's cancel for this database.
@@ -411,6 +412,7 @@ impl HaNode {
                     &db_path,
                     poll_interval,
                     position,
+                    caught_up,
                     cancel_rx,
                     metrics,
                 )
