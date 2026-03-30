@@ -89,6 +89,7 @@ impl FollowerBehavior for MockFollowerBehavior {
         _db_path: &PathBuf,
         _poll_interval: Duration,
         _position: Arc<std::sync::atomic::AtomicU64>,
+        _caught_up: Arc<std::sync::atomic::AtomicBool>,
         mut cancel_rx: watch::Receiver<bool>,
         _metrics: Arc<HaMetrics>,
     ) -> Result<()> {
@@ -136,9 +137,9 @@ async fn test_single_node_join_as_leader() {
     let (coordinator, replicator) = test_coordinator(None, config);
 
     let db_path = PathBuf::from("/tmp/test.db");
-    let role = coordinator.join("testdb", &db_path).await.unwrap();
+    let result = coordinator.join("testdb", &db_path).await.unwrap();
 
-    assert_eq!(role, Role::Leader);
+    assert_eq!(result.role, Role::Leader);
     assert!(coordinator.contains("testdb").await);
     assert_eq!(coordinator.role("testdb").await, Some(Role::Leader));
 
@@ -198,9 +199,9 @@ async fn test_ha_join_as_leader() {
     let (coordinator, replicator) = test_coordinator(Some(lease_store), config);
 
     let db_path = PathBuf::from("/tmp/test.db");
-    let role = coordinator.join("testdb", &db_path).await.unwrap();
+    let result = coordinator.join("testdb", &db_path).await.unwrap();
 
-    assert_eq!(role, Role::Leader);
+    assert_eq!(result.role, Role::Leader);
     assert!(coordinator.contains("testdb").await);
     assert_eq!(coordinator.role("testdb").await, Some(Role::Leader));
 
@@ -295,9 +296,9 @@ async fn test_ha_join_as_follower() {
     ));
 
     let (coordinator2, replicator2) = test_coordinator(Some(lease_store), config2);
-    let role = coordinator2.join("testdb", &db_path).await.unwrap();
+    let result2 = coordinator2.join("testdb", &db_path).await.unwrap();
 
-    assert_eq!(role, Role::Follower);
+    assert_eq!(result2.role, Role::Follower);
     assert_eq!(coordinator2.role("testdb").await, Some(Role::Follower));
 
     let addr = coordinator2.leader_address("testdb").await;
@@ -436,8 +437,8 @@ async fn test_concurrent_joins() {
         .collect();
 
     for handle in handles {
-        let role = handle.await.unwrap();
-        assert_eq!(role, Role::Leader);
+        let result = handle.await.unwrap();
+        assert_eq!(result.role, Role::Leader);
     }
 
     assert_eq!(coordinator.database_count().await, 10);

@@ -8,7 +8,7 @@
 //! part is `catchup_on_promotion` (e.g. walrust pull_incremental for SQLite).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +50,7 @@ pub trait FollowerBehavior: Send + Sync {
         db_path: &PathBuf,
         poll_interval: Duration,
         position: Arc<AtomicU64>,
+        caught_up: Arc<AtomicBool>,
         cancel_rx: watch::Receiver<bool>,
         metrics: Arc<HaMetrics>,
     ) -> Result<()>;
@@ -94,6 +95,7 @@ pub struct LeaseMonitorContext {
     pub(crate) role_ref: Arc<AtomicRole>,
     pub self_address: String,
     pub follower_position: Arc<AtomicU64>,
+    pub follower_caught_up: Arc<AtomicBool>,
     pub cancel_rx: watch::Receiver<bool>,
     pub node_registry: Option<Arc<dyn NodeRegistry>>,
     pub metrics: Arc<HaMetrics>,
@@ -273,8 +275,9 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                                 }
                             }
 
-                            // 5. Update shared role + address IMMEDIATELY.
+                            // 5. Update shared role + address + readiness IMMEDIATELY.
                             ctx.role_ref.store(Role::Leader);
+                            ctx.follower_caught_up.store(true, Ordering::SeqCst);
                             *ctx.leader_address.write().await = ctx.self_address.clone();
 
                             // 6. Emit Promoted event.
@@ -299,6 +302,7 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
 
                             if demoted {
                                 ctx.role_ref.store(Role::Follower);
+                                ctx.follower_caught_up.store(false, Ordering::SeqCst);
                             }
 
                             return Ok(true); // promoted

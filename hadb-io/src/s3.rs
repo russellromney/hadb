@@ -31,16 +31,10 @@ pub fn parse_bucket(bucket: &str) -> (String, String) {
 
 /// Create S3 client with optional custom endpoint (for Tigris/MinIO).
 pub async fn create_client(endpoint: Option<&str>) -> Result<Client> {
-    let mut config_loader = aws_config::from_env();
-
-    if let Some(endpoint) = endpoint {
-        config_loader = config_loader.endpoint_url(endpoint);
-    }
-
-    let config = config_loader.load().await;
+    let config = aws_config::from_env().load().await;
     let mut s3_config = aws_sdk_s3::config::Builder::from(&config);
-    if endpoint.is_some() {
-        s3_config = s3_config.force_path_style(true);
+    if let Some(endpoint) = endpoint {
+        s3_config = s3_config.endpoint_url(endpoint).force_path_style(true);
     }
     Ok(Client::from_conf(s3_config.build()))
 }

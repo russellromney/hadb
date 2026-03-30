@@ -30,6 +30,10 @@ pub struct HaMetrics {
     pub follower_pulls_failed: AtomicU64,
     pub follower_pulls_no_new_data: AtomicU64,
 
+    // Readiness gauges
+    pub follower_caught_up: AtomicU64,
+    pub follower_replay_position: AtomicU64,
+
     // Timing (stored as microseconds for atomic access)
     pub last_promotion_duration_us: AtomicU64,
     pub last_catchup_duration_us: AtomicU64,
@@ -55,6 +59,8 @@ impl HaMetrics {
             follower_pulls_succeeded: AtomicU64::new(0),
             follower_pulls_failed: AtomicU64::new(0),
             follower_pulls_no_new_data: AtomicU64::new(0),
+            follower_caught_up: AtomicU64::new(0),
+            follower_replay_position: AtomicU64::new(0),
             last_promotion_duration_us: AtomicU64::new(0),
             last_catchup_duration_us: AtomicU64::new(0),
             last_renewal_duration_us: AtomicU64::new(0),
@@ -80,6 +86,8 @@ impl HaMetrics {
             follower_pulls_succeeded: self.follower_pulls_succeeded.load(Ordering::Relaxed),
             follower_pulls_failed: self.follower_pulls_failed.load(Ordering::Relaxed),
             follower_pulls_no_new_data: self.follower_pulls_no_new_data.load(Ordering::Relaxed),
+            follower_caught_up: self.follower_caught_up.load(Ordering::Relaxed),
+            follower_replay_position: self.follower_replay_position.load(Ordering::Relaxed),
             last_promotion_duration_us: self.last_promotion_duration_us.load(Ordering::Relaxed),
             last_catchup_duration_us: self.last_catchup_duration_us.load(Ordering::Relaxed),
             last_renewal_duration_us: self.last_renewal_duration_us.load(Ordering::Relaxed),
@@ -122,6 +130,8 @@ pub struct MetricsSnapshot {
     pub follower_pulls_succeeded: u64,
     pub follower_pulls_failed: u64,
     pub follower_pulls_no_new_data: u64,
+    pub follower_caught_up: u64,
+    pub follower_replay_position: u64,
     pub last_promotion_duration_us: u64,
     pub last_catchup_duration_us: u64,
     pub last_renewal_duration_us: u64,
@@ -152,6 +162,10 @@ impl MetricsSnapshot {
         Self::counter(&mut out, "hadb_follower_pulls_succeeded_total", "Successful follower pulls", self.follower_pulls_succeeded);
         Self::counter(&mut out, "hadb_follower_pulls_failed_total", "Failed follower pulls", self.follower_pulls_failed);
         Self::counter(&mut out, "hadb_follower_pulls_no_new_data_total", "Follower pulls with no new data", self.follower_pulls_no_new_data);
+
+        // Readiness gauges
+        Self::gauge(&mut out, "hadb_follower_caught_up", "Whether follower is caught up (1=yes, 0=no)", self.follower_caught_up as f64);
+        Self::gauge(&mut out, "hadb_follower_replay_position", "Last replayed position", self.follower_replay_position as f64);
 
         // Gauges (last observed timing)
         Self::gauge(&mut out, "hadb_last_promotion_duration_seconds", "Duration of last promotion", self.last_promotion_duration_us as f64 / 1_000_000.0);
@@ -231,6 +245,8 @@ mod tests {
             follower_pulls_succeeded: 50,
             follower_pulls_failed: 2,
             follower_pulls_no_new_data: 10,
+            follower_caught_up: 1,
+            follower_replay_position: 42,
             last_promotion_duration_us: 500_000,
             last_catchup_duration_us: 100_000,
             last_renewal_duration_us: 5_000,

@@ -42,6 +42,6 @@ pub use lease::{DbLease, InMemoryLeaseStore, LeaseData};
 pub use node_registry::{node_key, nodes_prefix, InMemoryNodeRegistry, NodeRegistry, NodeRegistration};
 pub use follower::{FollowerBehavior, LeaseMonitorContext, run_leader_renewal, run_lease_monitor};
 pub use client::{HaClient, HaClientBuilder};
-pub use coordinator::Coordinator;
+pub use coordinator::{Coordinator, JoinResult};
 pub use ha_node::{HaNode, HaNodeConfig};
 pub use sharded_lease::ShardedLeaseStore;
