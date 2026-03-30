@@ -136,6 +136,7 @@ impl Coordinator {
                 let (cancel_tx, _) = watch::channel(false);
                 let caught_up = Arc::new(AtomicBool::new(true));
                 let position = Arc::new(AtomicU64::new(0));
+                self.metrics.follower_caught_up.store(1, Ordering::Relaxed);
                 self.databases.write().await.insert(
                     name.to_string(),
                     DbEntry {
@@ -249,6 +250,7 @@ impl Coordinator {
 
                 let leader_caught_up = Arc::new(AtomicBool::new(true));
                 let leader_position = Arc::new(AtomicU64::new(0));
+                self.metrics.follower_caught_up.store(1, Ordering::Relaxed);
                 self.databases.write().await.insert(
                     name.to_string(),
                     DbEntry {
@@ -653,6 +655,19 @@ impl Coordinator {
         }
 
         let _ = entry.cancel_tx.send(true);
+
+        // Flush pending data before releasing leadership.
+        if let Err(e) = tokio::time::timeout(
+            self.config.replicator_timeout,
+            self.replicator.sync(name),
+        )
+        .await
+        {
+            tracing::error!(
+                "Coordinator: handoff replicator.sync('{}') timed out after {:?}: {}",
+                name, self.config.replicator_timeout, e
+            );
+        }
 
         if tokio::time::timeout(
             self.config.replicator_timeout,

@@ -278,6 +278,7 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                             // 5. Update shared role + address + readiness IMMEDIATELY.
                             ctx.role_ref.store(Role::Leader);
                             ctx.follower_caught_up.store(true, Ordering::SeqCst);
+                            ctx.metrics.follower_caught_up.store(1, Ordering::Relaxed);
                             *ctx.leader_address.write().await = ctx.self_address.clone();
 
                             // 6. Emit Promoted event.
@@ -303,6 +304,7 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                             if demoted {
                                 ctx.role_ref.store(Role::Follower);
                                 ctx.follower_caught_up.store(false, Ordering::SeqCst);
+                                ctx.metrics.follower_caught_up.store(0, Ordering::Relaxed);
                             }
 
                             return Ok(true); // promoted
