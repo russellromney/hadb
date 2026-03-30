@@ -423,7 +423,7 @@ The application provides:
 
 ---
 
-## Phase Beacon: Follower Readiness in Coordinator
+## Phase Beacon: Follower Readiness in Coordinator (DONE)
 
 > After: Phase Volt · Before: Phase 2
 
