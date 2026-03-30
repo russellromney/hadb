@@ -38,7 +38,11 @@ pub async fn create_client(endpoint: Option<&str>) -> Result<Client> {
     }
 
     let config = config_loader.load().await;
-    Ok(Client::new(&config))
+    let mut s3_config = aws_sdk_s3::config::Builder::from(&config);
+    if endpoint.is_some() {
+        s3_config = s3_config.force_path_style(true);
+    }
+    Ok(Client::from_conf(s3_config.build()))
 }
 
 /// Upload bytes to S3.
