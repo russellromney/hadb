@@ -107,19 +107,22 @@ Shared infrastructure (S3 client, retry/circuit breaker, concurrent uploads, web
 
 ## Project status
 
-All crates published to [crates.io](https://crates.io/crates/hadb). 134 hadb tests, 600+ across the ecosystem.
+All crates published to [crates.io](https://crates.io/crates/hadb).
 
-| Crate | Status | Tests |
-|-------|--------|-------|
-| [**hadb**](https://github.com/russellromney/hadb/tree/main/hadb) | Core coordination, follower readiness, ShardedLeaseStore | 134 |
-| [**hadb-io**](https://github.com/russellromney/hadb/tree/main/hadb-io) | Shared S3/retry/upload/webhook/retention | -- |
-| [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) | S3 LeaseStore, StorageBackend, NodeRegistry | -- |
-| [**hadb-lease-nats**](https://github.com/russellromney/hadb/tree/main/hadb-lease-nats) | NATS JetStream KV LeaseStore (2-5ms CAS) | 10 |
-| [**hadb-cli**](https://github.com/russellromney/hadb/tree/main/hadb-cli) | Shared CLI framework | -- |
-| [**haqlite**](https://github.com/russellromney/haqlite) | SQLite HA via walrust | 162 |
-| [**hakuzu**](https://github.com/russellromney/hakuzu) | Kuzu/LadybugDB HA via graphstream | 176 |
-| [**walrust**](https://github.com/russellromney/walrust) | SQLite WAL replication to S3 | 95 |
-| [**graphstream**](https://github.com/russellromney/graphstream) | Graph journal replication to S3 | 86 |
+**Core (hadb workspace):**
+- [**hadb**](https://github.com/russellromney/hadb/tree/main/hadb) -- Coordination framework. Leader election, role management, follower readiness, ShardedLeaseStore. Stable.
+- [**hadb-io**](https://github.com/russellromney/hadb/tree/main/hadb-io) -- Shared infrastructure. ObjectStore trait, S3 client, retry/circuit breaker, concurrent uploads, webhooks, GFS retention. Stable.
+- [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) -- S3 lease store via conditional PUTs. Production-ready.
+- [**hadb-lease-nats**](https://github.com/russellromney/hadb/tree/main/hadb-lease-nats) -- NATS JetStream KV lease store. 20-50x faster than S3. New, tested against real NATS.
+- [**hadb-cli**](https://github.com/russellromney/hadb/tree/main/hadb-cli) -- Shared CLI framework (args, config, commands). Used by haqlite.
+
+**Database implementations:**
+- [**haqlite**](https://github.com/russellromney/haqlite) -- SQLite HA. Structured errors, forwarding retry, read semaphore, graceful shutdown, pluggable LeaseStore (S3 or NATS), CLI with 7 commands. Most complete.
+- [**hakuzu**](https://github.com/russellromney/hakuzu) -- Kuzu/LadybugDB HA. Deterministic Cypher rewriter, snapshot bootstrap, ObjectStore-based replication. Functional, less CLI tooling than haqlite.
+
+**Replication engines:**
+- [**walrust**](https://github.com/russellromney/walrust) -- SQLite WAL shipping to S3 via LTX format. Deterministic TXID, synchronous flush, point-in-time restore, streaming encoding. Mature.
+- [**graphstream**](https://github.com/russellromney/graphstream) -- Graph journal shipping to S3 via .graphj segments. Chain-hashed, compressed, encrypted. ObjectStore-based (hadb-io). Mature.
 
 ## Acknowledgments
 
