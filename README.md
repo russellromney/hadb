@@ -67,6 +67,7 @@ hadb is a workspace of crates:
 - **hadb-io** -- Shared IO infrastructure. `ObjectStore` trait, S3 client, retry with circuit breaker, concurrent uploads, HMAC-signed webhooks, GFS retention.
 - **hadb-lease-s3** -- S3 leader election via conditional PUTs (ETags). CAS for compare-and-swap.
 - **hadb-lease-nats** -- NATS JetStream KV leader election. 2-5ms operations (vs S3's 50-200ms). Zero per-request cost.
+- **hadb-lease-etcd** -- etcd leader election via KV transactions. Zero new infra on Kubernetes.
 - **hadb-cli** -- Shared CLI framework for database tools (args, config, commands).
 
 Database-specific crates (haqlite for SQLite, hakuzu for Kuzu) compose these layers.
@@ -113,7 +114,8 @@ All crates published to [crates.io](https://crates.io/crates/hadb).
 - [**hadb**](https://github.com/russellromney/hadb/tree/main/hadb) -- Coordination framework. Leader election, role management, follower readiness, ShardedLeaseStore. Stable.
 - [**hadb-io**](https://github.com/russellromney/hadb/tree/main/hadb-io) -- Shared infrastructure. ObjectStore trait, S3 client, retry/circuit breaker, concurrent uploads, webhooks, GFS retention. Stable.
 - [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) -- S3 lease store via conditional PUTs. Production-ready.
-- [**hadb-lease-nats**](https://github.com/russellromney/hadb/tree/main/hadb-lease-nats) -- NATS JetStream KV lease store. 20-50x faster than S3. New, tested against real NATS.
+- [**hadb-lease-nats**](https://github.com/russellromney/hadb/tree/main/hadb-lease-nats) -- NATS JetStream KV lease store. 20-50x faster than S3. Tested against real NATS.
+- [**hadb-lease-etcd**](https://github.com/russellromney/hadb/tree/main/hadb-lease-etcd) -- etcd lease store via KV transactions. Zero new infra on Kubernetes. Tested against real etcd.
 - [**hadb-cli**](https://github.com/russellromney/hadb/tree/main/hadb-cli) -- Shared CLI framework (args, config, commands). Used by haqlite.
 
 **Database implementations:**
@@ -134,7 +136,7 @@ hadb crates follow the pattern `hadb-{role}-{backend}` where the role maps to a 
 
 | Pattern | Trait | What it does | Examples |
 |---------|-------|-------------|----------|
-| `hadb-lease-{backend}` | `LeaseStore` | Leader election via CAS | hadb-lease-s3, hadb-lease-nats, hadb-lease-redis |
+| `hadb-lease-{backend}` | `LeaseStore` | Leader election via CAS | hadb-lease-s3, hadb-lease-nats, hadb-lease-etcd |
 | `hadb-storage-{backend}` | `StorageBackend` | Coordination blob storage | hadb-storage-s3 (in hadb-lease-s3 today) |
 | `hadb-transport-{backend}` | `ReplicationTransport` (future) | Real-time WAL streaming | hadb-transport-redpanda |
 | `hadb-stream-{backend}` | (consumer) | CDC from replication log | hadb-stream-redpanda |
@@ -164,7 +166,7 @@ S3 conditional PUTs work but have ~50-200ms latency per operation and charge per
 
 **hadb-lease-redis** (future) -- Redis `SET NX PX` for acquire, Lua scripts for atomic renew/release. 1-5ms per operation. Managed options everywhere (Upstash, ElastiCache, Aiven). Needs Redis HA (Sentinel or managed) to avoid being a SPOF; fall back to S3 lease if Redis is unreachable.
 
-**hadb-lease-etcd** (future) -- etcd native leases with KeepAlive. 2-5ms per operation. Purpose-built for distributed coordination (Kubernetes uses it). Best for teams already running Kubernetes.
+**hadb-lease-etcd** ([crates.io](https://crates.io/crates/hadb-lease-etcd)) -- etcd KV transactions for CAS leader election. 2-5ms per operation. Zero new infra on Kubernetes (uses existing etcd). Purpose-built for distributed coordination.
 
 **hadb-lease-consul** (future) -- Consul sessions + KV store. Proven pattern (LiteFS used this). Best for HashiCorp ecosystem deployments.
 
