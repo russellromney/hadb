@@ -76,15 +76,8 @@ impl LeaseStore for EtcdLeaseStore {
             .map_err(|e| anyhow!("etcd txn failed: {}", e))?;
 
         if resp.succeeded() {
-            // Read back to get the mod_revision as etag.
-            let get_resp = client
-                .get(pkey, None)
-                .await
-                .map_err(|e| anyhow!("etcd get after put failed: {}", e))?;
-            let etag = get_resp
-                .kvs()
-                .first()
-                .map(|kv| kv.mod_revision().to_string());
+            // The transaction header revision is the mod_revision of the key we just wrote.
+            let etag = resp.header().map(|h| h.revision().to_string());
             Ok(CasResult {
                 success: true,
                 etag,
@@ -116,14 +109,7 @@ impl LeaseStore for EtcdLeaseStore {
             .map_err(|e| anyhow!("etcd txn failed: {}", e))?;
 
         if resp.succeeded() {
-            let get_resp = client
-                .get(pkey, None)
-                .await
-                .map_err(|e| anyhow!("etcd get after put failed: {}", e))?;
-            let etag = get_resp
-                .kvs()
-                .first()
-                .map(|kv| kv.mod_revision().to_string());
+            let etag = resp.header().map(|h| h.revision().to_string());
             Ok(CasResult {
                 success: true,
                 etag,
