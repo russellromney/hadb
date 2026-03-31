@@ -1,6 +1,6 @@
 # hadb: cheap HA embedded databases
 
-> **Pre-1.0.** APIs may change between minor versions. Published to [crates.io](https://crates.io/crates/hadb).
+> **Experimental.** hadb is under active development and not yet stable. APIs will change without notice.
 
 hadb makes any embedded database highly available via cloud storage, without custom failover/restore logic.
 
