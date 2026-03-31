@@ -251,17 +251,74 @@ Source: `hadb-lease-s3/src/lease_store.rs` (same trait, different backend)
 10 tests against real NATS (gated by NATS_URL env var):
 - read nonexistent, create+read, create conflict, update CAS success/failure, stale revision, delete+read, delete idempotent, delete-then-create, etag is numeric revision
 
-### Volt-c: Engine integration (not started)
+### Volt-c: Engine integration (DONE)
 
-- haqlite: accept `NatsLeaseStore` via `WAL_LEASE_NATS_URL` env var in `WalReplicationManager`
-- Fallback: if NATS is unreachable, engines fall back to S3 leases (already battle-tested)
+haqlite has `.lease_store(Arc<dyn LeaseStore>)` on HaQLiteBuilder + `WAL_LEASE_NATS_URL` env var behind `nats-lease` feature. Falls back to S3 if NATS unreachable.
 
-### What NATS is NOT doing
+---
 
-- NOT replacing S3 for WAL storage/replication (walrust stays on S3)
-- NOT doing WAL streaming (future: Redpanda/Kafka for thousands of topics at high throughput)
-- NOT a message bus between engines
-- NOT the batch compactor
+## Immediate blockers
+
+### walrust 0.3.1: fix crates.io exports
+
+walrust 0.3.0 on crates.io has stale exports (`ReplicationConfig`, `pull_incremental`, `Replicator`, `SyncState` not re-exported from lib.rs). haqlite 0.2.0 can't publish until walrust's public API matches what haqlite imports. Fix: update `walrust-core/src/lib.rs` exports, publish 0.3.1.
+
+### lbug publish: unblock hakuzu + graphstream
+
+`StatementType` was merged upstream (LadybugDB/ladybug-rust#7). Once the ladybug maintainer publishes a new `lbug` version to crates.io, hakuzu can drop the local fork (`personal-website/ladybug-fork`) and publish to crates.io. graphstream has the same blocker via transitive dep.
+
+### NATS deployment
+
+Deploy single NATS server on Fly (~$2/month, shared-cpu-1x-256mb). Wire into cinch engines via `WAL_LEASE_NATS_URL`. The crate and integration exist; just needs a running server.
+
+---
+
+## Phase Forge: etcd Lease Store
+
+> After: Phase Volt · Before: Phase 4 (Multi-language SDKs)
+
+etcd is already running in every Kubernetes cluster. `hadb-lease-etcd` means zero new infrastructure for HA SQLite on k8s.
+
+### API mapping
+
+| LeaseStore | etcd |
+|---|---|
+| `read(key)` | `KV.get(key)`, mod_revision as etag |
+| `write_if_not_exists(key, data)` | `Txn.If(CreateRevision == 0).Then(Put)` |
+| `write_if_match(key, data, etag)` | `Txn.If(ModRevision == etag).Then(Put)` |
+| `delete(key)` | `KV.delete(key)` |
+
+etcd also has native leases with TTL + KeepAlive, which could replace the CAS-based TTL simulation. But for v1, stick with the same CAS pattern as S3/NATS for consistency.
+
+### Forge-a: hadb-lease-etcd crate
+
+New crate `hadb-lease-etcd/` in the hadb workspace. Implements `LeaseStore` via `etcd-client` crate.
+
+- `EtcdLeaseStore::connect(endpoints, prefix)` convenience constructor
+- `EtcdLeaseStore::new(client, prefix)` for pre-built client
+- CAS via etcd transactions (If/Then/Else)
+- Revision as etag (same pattern as NATS)
+- Prefix key namespacing to avoid collisions
+
+Source: `hadb-lease-nats/src/lease_store.rs` (same trait, adapt NATS patterns to etcd)
+
+Rust crate: `etcd-client` on crates.io (tonic-based, async)
+
+### Forge-b: Tests
+
+Same test matrix as NATS (gated by ETCD_ENDPOINTS env var):
+- read nonexistent, create+read, create conflict, update CAS success/failure, stale revision, delete+read, delete idempotent, delete-then-create, etag is numeric revision
+
+### Forge-c: haqlite integration
+
+haqlite already has `.lease_store()` on the builder and pluggable LeaseStore in serve. Add `WAL_LEASE_ETCD_ENDPOINTS` env var behind `etcd-lease` feature, same pattern as NATS.
+
+### Why etcd before Redis
+
+- Kubernetes users already have etcd. Zero new infra.
+- etcd has native CAS transactions (purpose-built for coordination).
+- Redis requires Lua scripts for CAS and HA setup (Sentinel/managed) to avoid SPOF.
+- etcd is a smaller, more correct implementation.
 
 ---
 
@@ -486,11 +543,9 @@ Source: `hakuzu/src/follower_behavior.rs:109-157` (the complete caught_up state 
 
 ---
 
-## Phase 2: haqlite CLI
+## Phase 2: haqlite CLI (DONE)
 
-After hadb-io extraction, haqlite gets a full CLI. See haqlite/ROADMAP.md.
-
-Commands: `serve` (watch + HA + wire protocol), `restore`, `list`, `verify`, `compact`, `replicate`, `explain`.
+See haqlite/ROADMAP.md Phase Meridian. 7 CLI bugs fixed, prefix threading, graceful shutdown, deterministic TXID.
 
 ## Phase 3: hakuzu CLI
 
