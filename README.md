@@ -1,10 +1,10 @@
 # hadb: cheap HA embedded databases
 
-> **Experimental.** hadb is under active development and not yet stable. APIs will change without notice.
+> **Pre-1.0.** APIs may change between minor versions. Published to [crates.io](https://crates.io/crates/hadb).
 
-hadb aims to make any embedded database highly available via cloud storage, without having to write custom failover/restore logic.
+hadb makes any embedded database highly available via cloud storage, without custom failover/restore logic.
 
-hadb's only high-level goal is high availability with better economics with multiple databases - not scaling or performance or single-database optimization.
+The goal is high availability with better economics for multi-database workloads, not scaling or single-database optimization.
 
 S3 provides impressive primitives:
 
@@ -61,13 +61,15 @@ Same replication and leader election in both modes. The difference is whether th
 
 ## Design
 
-hadb includes three crate layers:
+hadb is a workspace of crates:
 
-- **hadb** — Core coordination. Leader election, role management, follower behavior, metrics. Generic over four traits. Zero cloud dependencies.
-- **hadb-io** — Shared IO infrastructure. S3 client, retry with circuit breaker, concurrent uploads, HMAC-signed webhooks, GFS retention.
-- **hadb-lease-s3** — S3 leader election via conditional PUTs (ETags) for compare-and-swap.
+- **hadb** -- Core coordination. Leader election via `LeaseStore` trait, role management, follower readiness (`JoinResult` with `caught_up` + `position`), `ShardedLeaseStore` for horizontal scaling. Zero cloud dependencies.
+- **hadb-io** -- Shared IO infrastructure. `ObjectStore` trait, S3 client, retry with circuit breaker, concurrent uploads, HMAC-signed webhooks, GFS retention.
+- **hadb-lease-s3** -- S3 leader election via conditional PUTs (ETags). CAS for compare-and-swap.
+- **hadb-lease-nats** -- NATS JetStream KV leader election. 2-5ms operations (vs S3's 50-200ms). Zero per-request cost.
+- **hadb-cli** -- Shared CLI framework for database tools (args, config, commands).
 
-Database-specific crates (like haqlite for SQLite) compose all three layers to execute commands, replicate to storage, and determine leadership.
+Database-specific crates (haqlite for SQLite, hakuzu for Kuzu) compose these layers.
 
 ### Example: haqlite (SQLite HA)
 
@@ -105,11 +107,19 @@ Shared infrastructure (S3 client, retry/circuit breaker, concurrent uploads, web
 
 ## Project status
 
-- [**hadb**](https://github.com/russellromney/hadb/tree/main/hadb) — Core coordination. Leader election, role management, follower behavior, metrics.
-- [**hadb-io**](https://github.com/russellromney/hadb/tree/main/hadb-io) — Shared S3/retry/upload/webhook/retention infrastructure.
-- [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) — S3 `LeaseStore`, `StorageBackend`, `NodeRegistry`.
-- [**haqlite**](https://github.com/russellromney/haqlite) — SQLite HA. `Executor` + `Replicator` via walrust.
-- [**walrust**](https://github.com/russellromney/walrust) — SQLite replication to S3.
+All crates published to [crates.io](https://crates.io/crates/hadb). 134 hadb tests, 600+ across the ecosystem.
+
+| Crate | Status | Tests |
+|-------|--------|-------|
+| [**hadb**](https://github.com/russellromney/hadb/tree/main/hadb) | Core coordination, follower readiness, ShardedLeaseStore | 134 |
+| [**hadb-io**](https://github.com/russellromney/hadb/tree/main/hadb-io) | Shared S3/retry/upload/webhook/retention | -- |
+| [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) | S3 LeaseStore, StorageBackend, NodeRegistry | -- |
+| [**hadb-lease-nats**](https://github.com/russellromney/hadb/tree/main/hadb-lease-nats) | NATS JetStream KV LeaseStore (2-5ms CAS) | 10 |
+| [**hadb-cli**](https://github.com/russellromney/hadb/tree/main/hadb-cli) | Shared CLI framework | -- |
+| [**haqlite**](https://github.com/russellromney/haqlite) | SQLite HA via walrust | 162 |
+| [**hakuzu**](https://github.com/russellromney/hakuzu) | Kuzu/LadybugDB HA via graphstream | 176 |
+| [**walrust**](https://github.com/russellromney/walrust) | SQLite WAL replication to S3 | 95 |
+| [**graphstream**](https://github.com/russellromney/graphstream) | Graph journal replication to S3 | 86 |
 
 ## Acknowledgments
 
