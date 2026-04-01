@@ -160,13 +160,15 @@ Database-specific crates live in their own repos and compose hadb layers:
 | [hakuzu](https://github.com/russellromney/hakuzu) | Kuzu/LadybugDB | [graphstream](https://github.com/russellromney/graphstream) (journal shipping) |
 | [haduck](https://github.com/russellromney/haduck) | DuckDB | [duckblock](https://github.com/russellromney/duckblock) (block shipping) |
 
-S3-tiered storage implementations follow the [turbodb spec](turbodb/):
+Each ha{db} crate can optionally use a turbo{db} storage engine for S3-tiered caching. With turbo{db}, local disk becomes a cache instead of the source of truth. Followers cold-start in milliseconds (fetch structural pages from S3, serve queries immediately, warm the rest on demand). Volumes are sized for the working set, not the full database.
 
-| Implementation | Database | Language |
+| ha{db} | turbo{db} storage engine | Database |
 |---|---|---|
-| [turbolite](https://github.com/russellromney/turbolite) | SQLite | Rust |
-| [turbograph](https://github.com/russellromney/turbograph) | Kuzu/LadybugDB | C++ |
-| [turboduck](https://github.com/russellromney/turboduck) | DuckDB | C++ |
+| [haqlite](https://github.com/russellromney/haqlite) | [turbolite](https://github.com/russellromney/turbolite) | SQLite |
+| [hakuzu](https://github.com/russellromney/hakuzu) | [turbograph](https://github.com/russellromney/turbograph) | Kuzu/LadybugDB |
+| [haduck](https://github.com/russellromney/haduck) | [turboduck](https://github.com/russellromney/turboduck) | DuckDB |
+
+turbo{db} implementations follow the [turbodb spec](turbodb/). They work independently of ha{db} (tiered storage without HA) or as ha{db}'s storage engine (tiered + HA, where checkpoint = replication snapshot).
 
 ## Future directions
 
