@@ -1,22 +1,6 @@
-# turbodb: S3-Tiered Storage for Embedded Databases
+# turbodb Specification
 
-Implementation guide for building S3-backed tiered storage for any embedded database. This is the companion to hadb's HA replication. Together they give any embedded DB both high availability and S3-tiered storage.
-
-Reference implementations: turbolite (SQLite, Rust), turbograph (Kuzu, C++).
-
-## Integration with hadb
-
-The turbo layer's checkpoint *is* the ha layer's snapshot. When the leader checkpoints dirty pages to S3, those page groups are the replication state. A replica reads the manifest, fetches page groups on demand, and serves queries from its local cache. No full-DB copy is needed.
-
-```
-Leader:
-  write -> dirty pages -> checkpoint -> S3 page groups + manifest
-                                          |
-Follower:                                 v
-  open -> read manifest -> fetch page groups on demand -> local cache -> serve queries
-```
-
-The manifest is both the atomic commit point for tiered storage and the replication cursor for HA. hadb's lease determines who writes the manifest. turbodb's prefetch engine makes reads fast regardless of whether the local cache is warm.
+Full implementation spec for S3-tiered embedded database storage. See [README.md](README.md) for the high-level overview.
 
 ## S3 Layout
 
@@ -158,7 +142,7 @@ Support at least three named schedules switchable at runtime:
 Parse the database's metadata (catalog, storage manager state) to build a sorted interval map:
 
 ```
-[startPage, endPage) -> (tableId, isRelationship)
+[startPage, endPage) -> (tableId, tableType)
 ```
 
 Construction: after the database opens, read metadata pages and extract per-table column page ranges. Sort intervals by startPage for O(log n) binary search lookup.
