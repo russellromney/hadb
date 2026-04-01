@@ -677,6 +677,58 @@ The extension is C++ (DuckDB's FileSystem registration requires the unstable C++
 
 ---
 
+## Phase Solo: Standalone Mode for ha{db} Crates
+
+> After: Phase Anvil
+
+All ha{db} crates (haqlite, hakuzu, haduck) should support a standalone mode
+that does replication to S3 without HA coordination. One config flag flips
+between standalone (single writer, S3 backup, read replicas) and HA (leader
+election, write forwarding, failover). Same codebase, same replication engine.
+
+The user deployment path becomes incremental:
+
+1. Start with turbo{db} (tiered storage, single node, cheap)
+2. Add ha{db} standalone (replication to S3, restore from backup, read replicas)
+3. Flip to ha{db} HA (add a second node, automatic failover)
+
+Each step is one config change. No code changes, no migration, no data movement.
+
+### a. Coordinator standalone mode
+- [ ] Add `ha: bool` config flag to `Coordinator` (default: true for backward compat)
+- [ ] When `ha: false`: skip lease acquisition, skip write forwarding HTTP server
+- [ ] Still run replicator sync loop (journal/WAL shipping to S3)
+- [ ] Still run checkpoint (turbo{db} flushes page groups to S3)
+- [ ] Restore from S3 works the same as HA mode
+- [ ] Read replicas work: poll S3 for new segments, apply incrementally
+
+### b. haqlite standalone
+- [ ] `HaQLite::builder("bucket").ha(false).open(...)` skips lease + forwarding
+- [ ] walrust sync loop runs normally, uploads WAL segments to S3
+- [ ] turbolite checkpoint flushes page groups to S3
+- [ ] CLI: `serve --standalone` flag
+- [ ] `restore` command works the same (fetch from S3, replay)
+
+### c. hakuzu standalone
+- [ ] `HaKuzu::builder("bucket").ha(false).open(...)` skips lease + forwarding
+- [ ] graphstream journal shipping runs normally
+- [ ] turbograph checkpoint flushes page groups to S3
+- [ ] Restore from manifest + journal segments
+
+### d. haduck standalone
+- [ ] `HaDuck::builder("bucket").ha(false).open(...)` skips lease + forwarding
+- [ ] duckblock ships dirty blocks to S3 on checkpoint
+- [ ] turboduck manages tiered storage
+- [ ] Restore from S3 block snapshot
+
+### e. Tests
+- [ ] Each ha{db}: standalone write + checkpoint + restore on fresh node
+- [ ] Each ha{db}: standalone writer + read replica, replica sees new data
+- [ ] Each ha{db}: flip ha=false to ha=true, second node joins as follower
+- [ ] Coordinator: standalone mode skips lease, HA mode acquires lease
+
+---
+
 ## Phase 2: haqlite CLI (DONE)
 
 See haqlite/ROADMAP.md Phase Meridian. 7 CLI bugs fixed, prefix threading, graceful shutdown, deterministic TXID.
