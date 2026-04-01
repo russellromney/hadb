@@ -154,8 +154,9 @@ Database-specific crates live in their own repos and compose hadb layers:
 
 | Crate | Database | Replicator |
 |-------|----------|-----------|
-| `haqlite` | SQLite | walrust (WAL shipping) |
-| `hakuzu` | Kuzu/LadybugDB | graphstream (journal shipping) |
+| [haqlite](https://github.com/russellromney/haqlite) | SQLite | [walrust](https://github.com/russellromney/walrust) (WAL shipping) |
+| [hakuzu](https://github.com/russellromney/hakuzu) | Kuzu/LadybugDB | [graphstream](https://github.com/russellromney/graphstream) (journal shipping) |
+| haduck | DuckDB | planned |
 
 S3-tiered storage implementations follow the [turbodb spec](turbodb/):
 
