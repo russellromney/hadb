@@ -686,13 +686,19 @@ that does replication to S3 without HA coordination. One config flag flips
 between standalone (single writer, S3 backup, read replicas) and HA (leader
 election, write forwarding, failover). Same codebase, same replication engine.
 
-The user deployment path becomes incremental:
+turbo{db} and ha{db} are independent and composable:
 
-1. Start with turbo{db} (tiered storage, single node, cheap)
-2. Add ha{db} standalone (replication to S3, restore from backup, read replicas)
-3. Flip to ha{db} HA (add a second node, automatic failover)
+- **turbo{db} only**: tiered storage (S3 page groups, prefetch, NVMe caching). No replication.
+- **ha{db} standalone only**: replication to S3, restore, read replicas. No tiering (local disk is source of truth).
+- **ha{db} standalone + turbo{db}**: replication + tiered storage. Checkpoint = snapshot.
+- **ha{db} HA + turbo{db}**: full stack. Leader election, failover, tiered storage.
 
-Each step is one config change. No code changes, no migration, no data movement.
+The deployment path is incremental. Each layer is one config change:
+
+1. Bare database (local disk)
+2. Add turbo{db} (tiered storage, S3 durability, prefetch)
+3. Add ha{db} standalone (replication, restore, read replicas)
+4. Flip ha{db} to HA mode (leader election, write forwarding, failover)
 
 ### a. Coordinator standalone mode
 - [ ] Add `ha: bool` config flag to `Coordinator` (default: true for backward compat)
