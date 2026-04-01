@@ -69,8 +69,9 @@ hadb is a workspace of crates:
 - **hadb-lease-nats** -- NATS JetStream KV leader election. 2-5ms operations (vs S3's 50-200ms). Zero per-request cost.
 - **hadb-lease-etcd** -- etcd leader election via KV transactions. Zero new infra on Kubernetes.
 - **hadb-cli** -- Shared CLI framework for database tools (args, config, commands).
+- **[turbodb](turbodb/)** -- Spec for S3-tiered storage (page groups, prefetch, encryption, caching). Checkpoint = snapshot. The turbo layer's manifest is the ha layer's replication cursor.
 
-Database-specific crates (haqlite for SQLite, hakuzu for Kuzu) compose these layers.
+Database-specific crates (haqlite for SQLite, hakuzu for Kuzu) compose these layers. Tiered storage implementations (turbolite, turbograph) follow the turbodb spec.
 
 ### Example: haqlite (SQLite HA)
 
@@ -155,6 +156,13 @@ Database-specific crates live in their own repos and compose hadb layers:
 |-------|----------|-----------|
 | `haqlite` | SQLite | walrust (WAL shipping) |
 | `hakuzu` | Kuzu/LadybugDB | graphstream (journal shipping) |
+
+S3-tiered storage implementations follow the [turbodb spec](turbodb/):
+
+| Implementation | Database | Language |
+|---|---|---|
+| [turbolite](https://github.com/russellromney/turbolite) | SQLite | Rust |
+| [turbograph](https://github.com/russellromney/turbograph) | Kuzu/LadybugDB | C++ |
 
 ## Future directions
 
