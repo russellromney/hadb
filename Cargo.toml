@@ -1,5 +1,5 @@
 [workspace]
-members = ["hadb", "hadb-io", "hadb-lease-s3", "hadb-lease-nats", "hadb-lease-etcd", "hadb-cli"]
+members = ["hadb", "hadb-io", "hadb-lease-s3", "hadb-lease-nats", "hadb-lease-etcd", "hadb-cli", "hadb-changeset"]
 resolver = "2"
 
 [workspace.package]

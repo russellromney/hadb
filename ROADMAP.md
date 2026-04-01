@@ -687,6 +687,86 @@ Same command surface as haqlite (minus watch — graph DBs require active query 
 
 Commands: `serve` (Bolt protocol + HA), `restore`, `list`, `verify`, `compact`, `replicate`.
 
+## Replication Format Primitive (design note)
+
+Every hadb database implementation needs a "change batch" format. Today each defines its own:
+
+| Current | Engine | Type | Page/block ID | Page size |
+|---------|--------|------|---------------|-----------|
+| .ltx (walrust) | SQLite | Physical | u32, 1-indexed | 4KB |
+| .seg (duckblock) | DuckDB | Physical | u64, 0-indexed | 256KB |
+| .graphj (graphstream) | Kuzu | Logical | N/A | N/A |
+
+These should converge into **two ecosystem-standard formats**:
+
+### `.hadbp` -- hadb physical
+
+Ships changed pages/blocks. Follower writes them at byte offsets. Generic over page ID type and page size.
+
+```
+[magic: "HDBP"] [version: u8]
+[page_id_size: u8]         // 4 = u32 (SQLite), 8 = u64 (DuckDB, RocksDB)
+[max_page_size: u32]       // 4096, 262144, etc.
+[seq: u64] [prev_checksum: u64]
+[entry_count: u32]
+[page_id, data_len: u32, data: bytes]*
+[checksum: u64]
+```
+
+Replaces .ltx and .seg. Each engine provides only:
+- Page ID type (u32 or u64)
+- Max page size
+- How to read dirty pages from the database
+
+Everything else (encode, decode, checksum chain, S3 key layout, discovery, apply) is shared.
+
+### `.hadbj` -- hadb journal
+
+Ships rewritten queries for logical replication. Follower replays them.
+
+```
+[magic: "HDBJ"] [version: u8]
+[seq: u64] [prev_checksum: u64]
+[entry_count: u32]
+[timestamp: u64, query_len: u32, query: bytes, params_len: u32, params: bytes]*
+[checksum: u64]
+```
+
+Replaces .graphj. Each engine provides only:
+- How to rewrite queries deterministically
+- How to replay a query entry
+
+### Implementation: `hadb-changeset` crate
+
+```
+hadb-changeset/
+  src/
+    physical.rs   -- .hadbp encode/decode/checksum, generic over PageId trait
+    journal.rs    -- .hadbj encode/decode/checksum
+    discovery.rs  -- S3 key layout, discover_after, generation management
+    apply.rs      -- generic physical apply (pwrite at page_id * page_size)
+```
+
+All engines share:
+- **S3 key layout**: `{prefix}{db_name}/{generation:04x}/{seq:016x}.hadbp`
+- **Discovery**: `list_objects_after` for O(new files) catch-up
+- **Generations**: 0000 = incrementals, 0001+ = snapshots
+- **Checksum chain**: SHA-256(prev || sorted entries), stale lineage detection
+
+Per-engine code shrinks from ~300 lines to ~50 lines of type definitions.
+
+### Migration path
+
+1. Build `hadb-changeset` with .hadbp and .hadbj
+2. duckblock adopts .hadbp first (newest, least migration cost)
+3. walrust-core migrates .ltx to .hadbp (backward compat: read both, write .hadbp)
+4. graphstream migrates .graphj to .hadbj
+5. New engines (harock, haduck, etc.) use .hadbp from day one
+
+### When to build
+
+Trigger: third physical replication engine (harock for RocksDB). Until then, duckblock's .seg and walrust's .ltx work fine independently. The S3 coordination is already shared via `hadb-io::ObjectStore`.
+
 ## Phase 4: Multi-language SDKs
 
 FFI layer (haqlite-ffi, hakuzu-ffi) + language bindings (Python via PyO3, Node via napi-rs, Go via CGO).

@@ -68,6 +68,7 @@ hadb is a workspace of crates:
 - **hadb-lease-s3** -- S3 leader election via conditional PUTs (ETags). CAS for compare-and-swap.
 - **hadb-lease-nats** -- NATS JetStream KV leader election. 2-5ms operations (vs S3's 50-200ms). Zero per-request cost.
 - **hadb-lease-etcd** -- etcd leader election via KV transactions. Zero new infra on Kubernetes.
+- **[hadb-changeset](hadb-changeset/)** -- Unified replication formats. Physical (`.hadbp`) and journal (`.hadbj`) changesets with SHA-256 checksum chaining. Self-describing page ID width (u32 for SQLite, u64 for DuckDB).
 - **hadb-cli** -- Shared CLI framework for database tools (args, config, commands).
 - **[turbodb](turbodb/)** -- Spec for S3-tiered storage (page groups, prefetch, encryption, caching). Checkpoint = snapshot. The turbo layer's manifest is the ha layer's replication cursor.
 
