@@ -543,6 +543,140 @@ Source: `hakuzu/src/follower_behavior.rs:109-157` (the complete caught_up state 
 
 ---
 
+## Phase Anvil: haduck (HA DuckDB)
+
+> After: Phase Forge · Before: Phase 4
+
+First open-source HA DuckDB. Block-level replication via a custom DuckDB FileSystem extension. No WAL parsing (DuckDB's WAL is internal, undocumented, physical logging with rowids). Instead, intercept block I/O at the filesystem layer and ship dirty 256KB blocks to S3.
+
+### Why block-level, not WAL
+
+DuckDB's WAL uses physical logging (internal rowids, block references). No public API to read it, format changes between versions, nobody has successfully built WAL-based replication. MotherDuck solved this at the filesystem layer (proprietary FUSE). We do the same as a DuckDB extension.
+
+### Architecture
+
+```
+Your App
+  └── DuckDB (with haduck extension loaded)
+        └── HaduckFileSystem (registered via RegisterSubSystem)
+              ├── Write path: track dirty 256KB blocks
+              ├── Checkpoint: ship dirty blocks to S3 (hadb-io ObjectStore)
+              ├── Follower: download block diffs, apply to local copy
+              └── hadb Coordinator (leader election, role management)
+```
+
+The extension is C++ (DuckDB's FileSystem registration requires the unstable C++ API, same as httpfs). Block-shipping logic delegates to Rust via FFI (hadb-io for S3, hadb for coordination).
+
+### Components
+
+**haduck-ext** (C++ DuckDB extension)
+- Subclass `FileSystem`, implement `CanHandleFile()` for `haduck://` scheme
+- `Read(handle, buffer, size, location)` -- read from local cache, fetch from S3 on miss
+- `Write(handle, buffer, size, location)` -- write to local, mark block dirty in bitmap
+- `FileSync(handle)` -- on checkpoint: upload dirty blocks to S3, clear bitmap
+- Register via `fs.RegisterSubSystem(make_uniq<HaduckFileSystem>())` in extension load
+
+**haduck-core** (Rust library, called from C++ via FFI)
+- `DuckReplicator: hadb::Replicator` -- block-level sync to S3
+- `DuckFollowerBehavior: hadb::FollowerBehavior` -- download block diffs, apply
+- Block bitmap tracking (which 256KB blocks are dirty since last sync)
+- Uses hadb-io ObjectStore for S3 operations
+- Uses hadb Coordinator for leader election
+
+**haduck** (Rust binary/library, user-facing API)
+- `HaDuck::builder("bucket").open("/data/analytics.duckdb", schema).await?`
+- Same pattern as haqlite/hakuzu: builder, coordinator, structured errors
+- Loads the C++ extension automatically on open
+
+### Replication flow
+
+**Leader writes:**
+1. App writes via DuckDB SQL (INSERT, COPY, etc.)
+2. DuckDB writes 256KB blocks through HaduckFileSystem
+3. FileSystem marks each written block in a dirty bitmap
+4. On checkpoint (controlled, not auto): upload dirty blocks to S3 as `{prefix}/{db}/blocks/{block_id}_{version}`
+5. Upload manifest with block list + versions
+6. Clear dirty bitmap
+
+**Follower reads:**
+1. Poll S3 manifest for new versions
+2. Download changed blocks
+3. Apply to local file (256KB aligned writes)
+4. Local DuckDB reads see updated data
+
+**Cold start:**
+1. Download full database from S3 (latest snapshot)
+2. Or download manifest + all current block versions
+3. Join hadb cluster as follower
+
+### Key design decisions
+
+- **256KB blocks match DuckDB's storage format** -- no translation needed, just pass-through with dirty tracking
+- **Checkpoint-controlled, not continuous** -- DuckDB checkpoints are expensive (stop-the-world). Control timing, don't auto-checkpoint.
+- **Single-file replication** -- DuckDB is one file + WAL. After checkpoint, WAL is cleared. Ship the main file blocks.
+- **Read replicas are natural** -- followers have a full local copy. Analytical queries run locally at full speed.
+- **RPO = checkpoint interval** -- data between checkpoints is in the WAL (local only). If leader dies mid-checkpoint, last checkpoint is the recovery point.
+
+### Existing code to reuse
+
+- **Tiered VFS (ladybug-fork)** -- page bitmap, dirty tracking, S3 upload, manifest. Same pattern, different page size (256KB vs 4KB).
+- **hadb-io** -- ObjectStore trait, S3Backend, retry, circuit breaker
+- **hadb** -- Coordinator, LeaseStore, FollowerBehavior, JoinResult, HaMetrics
+- **hadb-lease-nats/etcd** -- fast leader election
+
+### What's different from haqlite/hakuzu
+
+| | haqlite | hakuzu | haduck |
+|---|---|---|---|
+| DB | SQLite | Kuzu | DuckDB |
+| Replication | WAL frames (walrust) | Journal entries (graphstream) | Block diffs (new) |
+| Extension lang | Pure Rust | Pure Rust (via lbug) | C++ extension + Rust FFI |
+| Block size | 4KB pages | 4KB pages | 256KB blocks |
+| Workload | OLTP | Graph queries | OLAP/analytics |
+| Checkpoint | SQLite auto | Kuzu manual | DuckDB controlled |
+
+### Phases
+
+**Anvil-a: haduck-ext scaffold**
+- DuckDB C++ extension template
+- HaduckFileSystem skeleton (pass-through to local filesystem)
+- Dirty block bitmap
+- Build with CMake, test with DuckDB test framework
+
+**Anvil-b: Block shipping to S3**
+- On FileSync: upload dirty blocks via hadb-io (Rust FFI)
+- Manifest format: `{block_id: version}` JSON
+- Download blocks for follower
+- Integration test: write on leader, checkpoint, verify blocks in S3
+
+**Anvil-c: hadb coordination**
+- DuckReplicator + DuckFollowerBehavior in Rust
+- Leader election via Coordinator
+- Follower polls manifest, downloads new blocks
+- Write forwarding (DuckDB SQL over HTTP, same pattern as haqlite)
+
+**Anvil-d: haduck user-facing API**
+- Rust library wrapping DuckDB + extension loading + hadb coordination
+- `HaDuck::builder()` API
+- Structured errors (HaDuckError)
+- Prometheus metrics
+
+**Anvil-e: Tests**
+- Block bitmap unit tests
+- Single-node: write + checkpoint + verify S3
+- Two-node: leader writes, follower sees data after sync
+- Cold start from S3
+- Failover: leader dies, follower promotes
+
+### Build dependencies
+
+- DuckDB source (for extension compilation)
+- CMake (DuckDB's build system)
+- hadb-io (S3, via Rust FFI from C++)
+- `duckdb` Rust crate (for the user-facing API)
+
+---
+
 ## Phase 2: haqlite CLI (DONE)
 
 See haqlite/ROADMAP.md Phase Meridian. 7 CLI bugs fixed, prefix threading, graceful shutdown, deterministic TXID.
