@@ -15,11 +15,11 @@ S3 provides impressive primitives:
 
 The hadb pattern is: embed your database in your application, use ecosystem primitives to replicate transactional changes to S3, and let hadb coordinate leader-follower roles and failover using leases in S3.
 
-Read the [project manifesto](PROJECT.md) for the full argument — where hadb shines, why embed your database, tradeoffs, comparisons, and directions.
+Read the [project manifesto](PROJECT.md) for the full argument -- where hadb shines, why embed your database, tradeoffs, comparisons, and directions.
 
 ## Architecture
 
-**Embedded mode** — the database lives inside your application process:
+**Embedded mode** -- the database lives inside your application process:
 
 ```
 ┌──────────────┐                        ┌──────────────┐
@@ -35,7 +35,7 @@ Read the [project manifesto](PROJECT.md) for the full argument — where hadb sh
 └──────────────┘ <───forward writes──── └──────────────┘
 ```
 
-**Cluster mode** — hadb runs as a standalone server, applications connect over a wire protocol:
+**Cluster mode** -- hadb runs as a standalone server, applications connect over a wire protocol:
 
 ```
 ┌──────────┐          ┌──────────┐
@@ -91,7 +91,7 @@ let name: String = db.query_row(
 ).await?;
 ```
 
-If this node is the leader, writes go directly to the local SQLite database. If it's a follower, writes are forwarded to the leader over HTTP. Reads are local by default — fast, but eventually consistent (followers are 1-2s behind the leader). For strong consistency, reads can forward to the leader too, at the cost of a network round trip.
+If this node is the leader, writes go directly to the local SQLite database. If it's a follower, writes are forwarded to the leader over HTTP. Reads are local by default -- fast, but eventually consistent (followers are 1-2s behind the leader). For strong consistency, reads can forward to the leader too, at the cost of a network round trip.
 
 ### Adding a new database
 
@@ -99,14 +99,14 @@ hadb handles coordination; you tell it how your database replicates and executes
 
 | Trait | What it does | SQLite example |
 |-------|-------------|----------------|
-| **`Replicator`** | Sync layer — add, pull, remove, sync | [walrust](https://github.com/russellromney/walrust) — WAL replication to S3 |
-| **`Executor`** | Query execution — execute, is_mutation | [haqlite](https://github.com/russellromney/haqlite) — rusqlite read/write with role-aware forwarding |
-| **`LeaseStore`** | Leader election — read, write_if_match, delete | [hadb-lease-s3](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) — S3 conditional PUT (ETag CAS) leader claims and node registry |
-| **`StorageBackend`** | Coordination blobs — upload, download, list, delete | [hadb-io/s3](https://github.com/russellromney/hadb/tree/main/hadb-io) — S3 for storage |
+| **`Replicator`** | Sync layer -- add, pull, remove, sync | [walrust](https://github.com/russellromney/walrust) -- WAL replication to S3 |
+| **`Executor`** | Query execution -- execute, is_mutation | [haqlite](https://github.com/russellromney/haqlite) -- rusqlite read/write with role-aware forwarding |
+| **`LeaseStore`** | Leader election -- read, write_if_match, delete | [hadb-lease-s3](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) -- S3 conditional PUT (ETag CAS) leader claims and node registry |
+| **`StorageBackend`** | Coordination blobs -- upload, download, list, delete | [hadb-io/s3](https://github.com/russellromney/hadb/tree/main/hadb-io) -- S3 for storage |
 
 `LeaseStore` and `StorageBackend` already have S3 implementations in hadb-lease-s3. For most new databases, you only need to implement `Replicator` and `Executor`.
 
-Shared infrastructure (S3 client, retry/circuit breaker, concurrent uploads, webhooks, GFS retention) is provided by [hadb-io](https://github.com/russellromney/hadb/tree/main/hadb-io) — your replicator uses it instead of writing S3 upload logic from scratch.
+Shared infrastructure (S3 client, retry/circuit breaker, concurrent uploads, webhooks, GFS retention) is provided by [hadb-io](https://github.com/russellromney/hadb/tree/main/hadb-io) -- your replicator uses it instead of writing S3 upload logic from scratch.
 
 ## Project status
 
@@ -125,9 +125,9 @@ All crates published to [crates.io](https://crates.io/crates/hadb).
 - [**hakuzu**](https://github.com/russellromney/hakuzu) -- Kuzu/LadybugDB HA. Deterministic Cypher rewriter, snapshot bootstrap, ObjectStore-based replication. Functional, less CLI tooling than haqlite.
 
 **Replication engines:**
-- [**walrust**](https://github.com/russellromney/walrust) -- SQLite WAL shipping to S3 via LTX format. Deterministic TXID, synchronous flush, point-in-time restore, streaming encoding. Mature.
+- [**walrust**](https://github.com/russellromney/walrust) -- SQLite WAL shipping to S3 via HADBP changesets. Deterministic TXID, synchronous flush, point-in-time restore. Mature.
 - [**graphstream**](https://github.com/russellromney/graphstream) -- Graph journal shipping to S3 via .graphj segments. Chain-hashed, compressed, encrypted. ObjectStore-based (hadb-io). Mature.
-- **duckblock** -- DuckDB WAL block shipping to S3. Planned.
+- [**duckblock**](https://github.com/russellromney/duckblock) -- DuckDB block-level replication to S3 via HADBP segments. Checksum-chained, follower apply, pull_incremental.
 
 ## Acknowledgments
 
@@ -158,7 +158,7 @@ Database-specific crates live in their own repos and compose hadb layers:
 |-------|----------|-----------|
 | [haqlite](https://github.com/russellromney/haqlite) | SQLite | [walrust](https://github.com/russellromney/walrust) (WAL shipping) |
 | [hakuzu](https://github.com/russellromney/hakuzu) | Kuzu/LadybugDB | [graphstream](https://github.com/russellromney/graphstream) (journal shipping) |
-| haduck | DuckDB | duckblock (WAL block shipping) |
+| [haduck](https://github.com/russellromney/haduck) | DuckDB | [duckblock](https://github.com/russellromney/duckblock) (block shipping) |
 
 S3-tiered storage implementations follow the [turbodb spec](turbodb/):
 
