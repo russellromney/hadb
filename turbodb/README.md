@@ -1,8 +1,8 @@
 # turbodb: S3-Tiered Storage for Embedded Databases
 
-turbodb is a spec for building S3-backed tiered storage for any embedded database. It is the companion to hadb's HA replication. Together they give any embedded DB both high availability and cost-effective S3-tiered storage.
+turbodb is a language-agnostic spec for building S3-backed tiered storage for any embedded database. It is the companion to hadb's HA replication. Together they give any embedded DB both high availability and cost-effective S3-tiered storage.
 
-Reference implementations: turbolite (SQLite, Rust), turbograph (Kuzu, C++).
+Reference implementations: [turbolite](https://github.com/russellromney/turbolite) (SQLite, Rust), [turbograph](https://github.com/russellromney/turbograph) (Kuzu, C++).
 
 See [SPEC.md](SPEC.md) for the full implementation specification.
 
@@ -46,8 +46,8 @@ The manifest is both the atomic commit point for tiered storage and the replicat
 
 | Implementation | Database | Language | Status |
 |---|---|---|---|
-| turbolite | SQLite | Rust | Production |
-| turbograph | Kuzu/LadybugDB | C++ | Benchmarking |
+| [turbolite](https://github.com/russellromney/turbolite) | SQLite | Rust | Production |
+| [turbograph](https://github.com/russellromney/turbograph) | Kuzu/LadybugDB | C++ | Benchmarking |
 | turboduck | DuckDB | C++ | Planned |
 
 ## What's DB-specific
