@@ -50,7 +50,7 @@ Pages are grouped into fixed-size chunks. Recommended sizes (uncompressed, typic
 |---|---|---|---|
 | SQLite (turbolite) | 4-64KB | 4096 | 16-256MB |
 | Kuzu (turbograph) | 4KB | 4096 | 16MB |
-| DuckDB (turboduck) | 256KB | 128 | 32MB |
+| DuckDB (turboduck) | 256KB | 256 | 64MB |
 
 ### Seekable multi-frame encoding
 
