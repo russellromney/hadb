@@ -126,6 +126,7 @@ All crates published to [crates.io](https://crates.io/crates/hadb).
 **Replication engines:**
 - [**walrust**](https://github.com/russellromney/walrust) -- SQLite WAL shipping to S3 via LTX format. Deterministic TXID, synchronous flush, point-in-time restore, streaming encoding. Mature.
 - [**graphstream**](https://github.com/russellromney/graphstream) -- Graph journal shipping to S3 via .graphj segments. Chain-hashed, compressed, encrypted. ObjectStore-based (hadb-io). Mature.
+- **duckblock** -- DuckDB WAL block shipping to S3. Planned.
 
 ## Acknowledgments
 
@@ -156,7 +157,7 @@ Database-specific crates live in their own repos and compose hadb layers:
 |-------|----------|-----------|
 | [haqlite](https://github.com/russellromney/haqlite) | SQLite | [walrust](https://github.com/russellromney/walrust) (WAL shipping) |
 | [hakuzu](https://github.com/russellromney/hakuzu) | Kuzu/LadybugDB | [graphstream](https://github.com/russellromney/graphstream) (journal shipping) |
-| haduck | DuckDB | planned |
+| haduck | DuckDB | duckblock (WAL block shipping) |
 
 S3-tiered storage implementations follow the [turbodb spec](turbodb/):
 
