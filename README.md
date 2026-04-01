@@ -163,6 +163,7 @@ S3-tiered storage implementations follow the [turbodb spec](turbodb/):
 |---|---|---|
 | [turbolite](https://github.com/russellromney/turbolite) | SQLite | Rust |
 | [turbograph](https://github.com/russellromney/turbograph) | Kuzu/LadybugDB | C++ |
+| [turboduck](https://github.com/russellromney/turboduck) | DuckDB | C++ |
 
 ## Future directions
 

@@ -48,7 +48,7 @@ The manifest is both the atomic commit point for tiered storage and the replicat
 |---|---|---|---|
 | [turbolite](https://github.com/russellromney/turbolite) | SQLite | Rust | Production |
 | [turbograph](https://github.com/russellromney/turbograph) | Kuzu/LadybugDB | C++ | Benchmarking |
-| turboduck | DuckDB | C++ | Planned |
+| [turboduck](https://github.com/russellromney/turboduck) | DuckDB | C++ | Planning |
 
 ## What's DB-specific
 
