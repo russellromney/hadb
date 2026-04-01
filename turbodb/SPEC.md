@@ -44,7 +44,13 @@ Page groups are immutable. On checkpoint, dirty groups get new versioned keys (`
 
 ### Layout
 
-Pages are grouped into fixed-size chunks. Default: 2048 pages per group (8MB at 4KB page size, 128MB at 64KB page size).
+Pages are grouped into fixed-size chunks. Recommended sizes (uncompressed, typically compress to 20-30% with zstd on columnar data):
+
+| Database | Page size | Pages/group | Group size (raw) |
+|---|---|---|---|
+| SQLite (turbolite) | 4-64KB | 4096 | 16-256MB |
+| Kuzu (turbograph) | 4KB | 4096 | 16MB |
+| DuckDB (turboduck) | 256KB | 128 | 32MB |
 
 ### Seekable multi-frame encoding
 
