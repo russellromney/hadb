@@ -56,12 +56,24 @@ pub trait UploadHandler: Send + Sync + 'static {
 }
 
 /// Message sent to the uploader task.
-#[derive(Debug, Clone)]
 pub enum UploadMessage<Id> {
     /// Upload an item with this ID.
     Upload(Id),
+    /// Upload with acknowledgment: caller awaits the oneshot receiver
+    /// to block until upload completes and get the success/failure result.
+    UploadWithAck(Id, tokio::sync::oneshot::Sender<anyhow::Result<()>>),
     /// Graceful shutdown: complete in-flight uploads, then exit.
     Shutdown,
+}
+
+impl<Id: std::fmt::Debug> std::fmt::Debug for UploadMessage<Id> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Upload(id) => f.debug_tuple("Upload").field(id).finish(),
+            Self::UploadWithAck(id, _) => f.debug_tuple("UploadWithAck").field(id).finish(),
+            Self::Shutdown => write!(f, "Shutdown"),
+        }
+    }
 }
 
 /// Upload statistics.
@@ -140,6 +152,19 @@ impl<H: UploadHandler> ConcurrentUploader<H> {
                             let id_clone = id.clone();
                             in_flight.spawn(async move {
                                 let result = handler.upload(id_clone.clone()).await;
+                                (id_clone, result)
+                            });
+                        }
+                        Some(UploadMessage::UploadWithAck(id, ack_tx)) => {
+                            let handler = self.handler.clone();
+                            let id_clone = id.clone();
+                            in_flight.spawn(async move {
+                                let result = handler.upload(id_clone.clone()).await;
+                                let ack_result = match &result {
+                                    Ok(_) => Ok(()),
+                                    Err(e) => Err(anyhow::anyhow!("{}", e)),
+                                };
+                                let _ = ack_tx.send(ack_result);
                                 (id_clone, result)
                             });
                         }
@@ -605,6 +630,76 @@ mod tests {
 
         let stats = task.await.unwrap().unwrap();
         assert_eq!(stats.uploads_succeeded, 1);
+    }
+
+    #[tokio::test]
+    async fn test_upload_with_ack_success() {
+        let handler = Arc::new(MockHandler::new("test"));
+        let uploader = Arc::new(ConcurrentUploader::new(handler.clone(), 4));
+
+        let (tx, rx) = mpsc::channel(10);
+        let uploader_clone = uploader.clone();
+        let task = tokio::spawn(async move { uploader_clone.run(rx).await });
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(UploadMessage::UploadWithAck(1, ack_tx)).await.unwrap();
+
+        let result = ack_rx.await.unwrap();
+        assert!(result.is_ok());
+        assert!(handler.uploaded_ids().contains(&1));
+
+        tx.send(UploadMessage::Shutdown).await.unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!(stats.uploads_succeeded, 1);
+    }
+
+    #[tokio::test]
+    async fn test_upload_with_ack_failure() {
+        let mut fail_ids = HashSet::new();
+        fail_ids.insert(1);
+
+        let handler = Arc::new(MockHandler::new("test").with_fail_ids(fail_ids));
+        let uploader = Arc::new(ConcurrentUploader::new(handler.clone(), 4));
+
+        let (tx, rx) = mpsc::channel(10);
+        let uploader_clone = uploader.clone();
+        let task = tokio::spawn(async move { uploader_clone.run(rx).await });
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(UploadMessage::UploadWithAck(1, ack_tx)).await.unwrap();
+
+        let result = ack_rx.await.unwrap();
+        assert!(result.is_err());
+        assert!(!handler.uploaded_ids().contains(&1));
+
+        tx.send(UploadMessage::Shutdown).await.unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!(stats.uploads_failed, 1);
+    }
+
+    #[tokio::test]
+    async fn test_upload_with_ack_mixed_with_fire_and_forget() {
+        let handler = Arc::new(MockHandler::new("test"));
+        let uploader = Arc::new(ConcurrentUploader::new(handler.clone(), 4));
+
+        let (tx, rx) = mpsc::channel(10);
+        let uploader_clone = uploader.clone();
+        let task = tokio::spawn(async move { uploader_clone.run(rx).await });
+
+        tx.send(UploadMessage::Upload(1)).await.unwrap();
+        tx.send(UploadMessage::Upload(2)).await.unwrap();
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(UploadMessage::UploadWithAck(3, ack_tx)).await.unwrap();
+
+        tx.send(UploadMessage::Upload(4)).await.unwrap();
+
+        let result = ack_rx.await.unwrap();
+        assert!(result.is_ok());
+
+        tx.send(UploadMessage::Shutdown).await.unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!(stats.uploads_succeeded, 4);
     }
 
     #[tokio::test]
