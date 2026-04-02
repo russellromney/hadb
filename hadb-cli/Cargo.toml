@@ -21,7 +21,7 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 
 # Shared S3/retry infrastructure
-hadb-io = { path = "../hadb-io", version = "0.2.0" }
+hadb-io = { path = "../hadb-io", version = "0.3.0" }
 
 # Serialization
 serde = { workspace = true }
