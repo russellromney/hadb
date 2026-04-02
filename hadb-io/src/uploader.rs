@@ -39,7 +39,7 @@ use tokio::task::JoinSet;
 pub trait UploadHandler: Send + Sync + 'static {
     /// The identifier type for items to upload.
     /// e.g., `u64` (TXID) for walrust, `String` (segment name) for graphstream.
-    type Id: Clone + Send + std::fmt::Display + std::fmt::Debug + 'static;
+    type Id: Clone + Send + std::fmt::Debug + 'static;
 
     /// Upload a single item. Returns bytes uploaded on success.
     ///
@@ -219,13 +219,13 @@ impl<H: UploadHandler> ConcurrentUploader<H> {
                 stats.uploads_attempted += 1;
                 stats.uploads_succeeded += 1;
                 stats.bytes_uploaded += bytes;
-                tracing::debug!("[{}] Uploaded {} ({} bytes)", self.handler.name(), id, bytes);
+                tracing::debug!("[{}] Uploaded {:?} ({} bytes)", self.handler.name(), id, bytes);
             }
             Ok((id, Err(e))) => {
                 let mut stats = self.stats.lock().await;
                 stats.uploads_attempted += 1;
                 stats.uploads_failed += 1;
-                tracing::error!("[{}] Upload failed for {}: {}", self.handler.name(), id, e);
+                tracing::error!("[{}] Upload failed for {:?}: {}", self.handler.name(), id, e);
             }
             Err(e) => {
                 let mut stats = self.stats.lock().await;
