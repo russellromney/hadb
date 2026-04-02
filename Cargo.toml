@@ -3,7 +3,7 @@ members = ["hadb", "hadb-io", "hadb-lease-s3", "hadb-lease-nats", "hadb-lease-et
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["Russell Romney <russellromney@gmail.com>"]
 license = "Apache-2.0"
