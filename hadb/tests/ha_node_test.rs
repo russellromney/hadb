@@ -841,11 +841,20 @@ async fn test_engine_lease_loss_demotes_all_databases() {
     assert_eq!(node.role("db1").await, Some(Role::Follower));
     assert_eq!(node.role("db2").await, Some(Role::Follower));
 
-    // Wait for the other engine's lease to expire (1s TTL) + our poll interval
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Wait for the other engine's lease to expire (1s TTL) + poll interval.
+    // Poll in a loop to avoid flakiness on loaded machines.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if node.engine_role() == Role::Leader {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("Engine did not acquire lease within 5s");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
-    // Our node should have acquired the lease and promoted all databases
-    assert_eq!(node.engine_role(), Role::Leader, "Engine should have acquired lease");
+    // All databases should be promoted
     assert_eq!(node.role("db1").await, Some(Role::Leader), "db1 should be promoted");
     assert_eq!(node.role("db2").await, Some(Role::Leader), "db2 should be promoted");
 }
