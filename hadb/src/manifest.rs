@@ -60,12 +60,16 @@ pub enum StorageManifest {
     Turbolite {
         page_count: u64,
         page_size: u32,
+        pages_per_group: u32,
+        sub_pages_per_frame: u32,
+        strategy: String,
         page_group_keys: Vec<String>,
         frame_tables: Vec<Vec<FrameEntry>>,
         group_pages: Vec<Vec<u64>>,
-        btrees: BTreeMap<u64, BTreeInfo>,
-        interior_chunk_keys: Vec<String>,
-        index_chunk_keys: Vec<String>,
+        btrees: BTreeMap<u64, BTreeManifestEntry>,
+        interior_chunk_keys: BTreeMap<u32, String>,
+        index_chunk_keys: BTreeMap<u32, String>,
+        subframe_overrides: Vec<BTreeMap<usize, SubframeOverride>>,
     },
     Walrust {
         txid: u64,
@@ -77,21 +81,19 @@ pub enum StorageManifest {
 }
 
 /// A single frame entry in a turbolite frame table.
-///
-/// Minimal stand-in; turbolite will define the real version.
+/// Represents a byte range within an S3 object.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FrameEntry {
-    pub page_number: u64,
-    pub frame_offset: u64,
+    pub offset: u64,
+    pub len: u32,
 }
 
-/// B-tree metadata for a turbolite page group.
-///
-/// Minimal stand-in; turbolite will define the real version.
+/// B-tree metadata with group associations for a turbolite page group.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BTreeInfo {
-    pub root_page: u64,
-    pub depth: u32,
+pub struct BTreeManifestEntry {
+    pub name: String,
+    pub obj_type: String,
+    pub group_ids: Vec<u64>,
 }
 
 /// Override for a specific subframe (future turbolite Phase Drift).
@@ -207,21 +209,26 @@ mod tests {
             storage: StorageManifest::Turbolite {
                 page_count: 100,
                 page_size: 4096,
+                pages_per_group: 256,
+                sub_pages_per_frame: 16,
+                strategy: "Positional".to_string(),
                 page_group_keys: vec!["pg-0".to_string()],
                 frame_tables: vec![vec![FrameEntry {
-                    page_number: 1,
-                    frame_offset: 0,
+                    offset: 0,
+                    len: 4096,
                 }]],
                 group_pages: vec![vec![1, 2, 3]],
                 btrees: BTreeMap::from([(
                     1,
-                    BTreeInfo {
-                        root_page: 1,
-                        depth: 2,
+                    BTreeManifestEntry {
+                        name: "sqlite_master".to_string(),
+                        obj_type: "table".to_string(),
+                        group_ids: vec![0, 1],
                     },
                 )]),
-                interior_chunk_keys: vec!["ic-0".to_string()],
-                index_chunk_keys: vec!["idx-0".to_string()],
+                interior_chunk_keys: BTreeMap::from([(0, "ic-0".to_string())]),
+                index_chunk_keys: BTreeMap::from([(0, "idx-0".to_string())]),
+                subframe_overrides: vec![BTreeMap::new()],
             },
         }
     }
@@ -399,15 +406,23 @@ mod tests {
         let storage = StorageManifest::Turbolite {
             page_count: 50,
             page_size: 8192,
+            pages_per_group: 128,
+            sub_pages_per_frame: 8,
+            strategy: "BTreeAware".to_string(),
             page_group_keys: vec!["a".into(), "b".into()],
             frame_tables: vec![vec![
-                FrameEntry { page_number: 1, frame_offset: 0 },
-                FrameEntry { page_number: 2, frame_offset: 4096 },
+                FrameEntry { offset: 0, len: 4096 },
+                FrameEntry { offset: 4096, len: 4096 },
             ]],
             group_pages: vec![vec![1, 2]],
-            btrees: BTreeMap::from([(1, BTreeInfo { root_page: 1, depth: 3 })]),
-            interior_chunk_keys: vec!["ic".into()],
-            index_chunk_keys: vec![],
+            btrees: BTreeMap::from([(1, BTreeManifestEntry {
+                name: "idx_foo".to_string(),
+                obj_type: "index".to_string(),
+                group_ids: vec![0],
+            })]),
+            interior_chunk_keys: BTreeMap::from([(0, "ic".to_string())]),
+            index_chunk_keys: BTreeMap::new(),
+            subframe_overrides: vec![],
         };
         let bytes = rmp_serde::to_vec(&storage).expect("serialize");
         let decoded: StorageManifest = rmp_serde::from_slice(&bytes).expect("deserialize");
@@ -516,8 +531,8 @@ mod tests {
         let ovr = SubframeOverride {
             key: "subframe-42".to_string(),
             entry: FrameEntry {
-                page_number: 42,
-                frame_offset: 8192,
+                offset: 8192,
+                len: 4096,
             },
         };
         let bytes = rmp_serde::to_vec(&ovr).expect("serialize");
@@ -615,12 +630,16 @@ mod tests {
             storage: StorageManifest::Turbolite {
                 page_count: 0,
                 page_size: 0,
+                pages_per_group: 0,
+                sub_pages_per_frame: 0,
+                strategy: "Positional".to_string(),
                 page_group_keys: vec![],
                 frame_tables: vec![],
                 group_pages: vec![],
                 btrees: BTreeMap::new(),
-                interior_chunk_keys: vec![],
-                index_chunk_keys: vec![],
+                interior_chunk_keys: BTreeMap::new(),
+                index_chunk_keys: BTreeMap::new(),
+                subframe_overrides: vec![],
             },
         };
 
@@ -758,30 +777,42 @@ mod tests {
             StorageManifest::Turbolite {
                 page_count,
                 page_size,
+                pages_per_group,
+                sub_pages_per_frame,
+                strategy,
                 page_group_keys,
                 frame_tables,
                 group_pages,
                 btrees,
                 interior_chunk_keys,
                 index_chunk_keys,
+                subframe_overrides,
             } => {
                 assert_eq!(*page_count, 100);
                 assert_eq!(*page_size, 4096);
+                assert_eq!(*pages_per_group, 256);
+                assert_eq!(*sub_pages_per_frame, 16);
+                assert_eq!(strategy, "Positional");
                 assert_eq!(page_group_keys, &vec!["pg-0".to_string()]);
                 assert_eq!(
                     frame_tables,
                     &vec![vec![FrameEntry {
-                        page_number: 1,
-                        frame_offset: 0,
+                        offset: 0,
+                        len: 4096,
                     }]]
                 );
                 assert_eq!(group_pages, &vec![vec![1u64, 2, 3]]);
                 assert_eq!(
                     btrees,
-                    &BTreeMap::from([(1, BTreeInfo { root_page: 1, depth: 2 })])
+                    &BTreeMap::from([(1, BTreeManifestEntry {
+                        name: "sqlite_master".to_string(),
+                        obj_type: "table".to_string(),
+                        group_ids: vec![0, 1],
+                    })])
                 );
-                assert_eq!(interior_chunk_keys, &vec!["ic-0".to_string()]);
-                assert_eq!(index_chunk_keys, &vec!["idx-0".to_string()]);
+                assert_eq!(interior_chunk_keys, &BTreeMap::from([(0, "ic-0".to_string())]));
+                assert_eq!(index_chunk_keys, &BTreeMap::from([(0, "idx-0".to_string())]));
+                assert_eq!(subframe_overrides, &vec![BTreeMap::new()]);
             }
             _ => panic!("expected Turbolite"),
         }

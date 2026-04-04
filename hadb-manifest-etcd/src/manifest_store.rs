@@ -176,7 +176,7 @@ impl ManifestStore for EtcdManifestStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hadb::{StorageManifest, FrameEntry, BTreeInfo};
+    use hadb::{StorageManifest, FrameEntry, BTreeManifestEntry};
     use std::collections::BTreeMap;
 
     fn make_manifest(writer: &str, epoch: u64) -> HaManifest {
@@ -204,12 +204,20 @@ mod tests {
             storage: StorageManifest::Turbolite {
                 page_count: 100,
                 page_size: 4096,
+                pages_per_group: 256,
+                sub_pages_per_frame: 16,
+                strategy: "Positional".to_string(),
                 page_group_keys: vec!["pg-0".to_string()],
-                frame_tables: vec![vec![FrameEntry { page_number: 1, frame_offset: 0 }]],
+                frame_tables: vec![vec![FrameEntry { offset: 0, len: 4096 }]],
                 group_pages: vec![vec![1, 2, 3]],
-                btrees: BTreeMap::from([(1, BTreeInfo { root_page: 1, depth: 2 })]),
-                interior_chunk_keys: vec!["ic-0".to_string()],
-                index_chunk_keys: vec!["idx-0".to_string()],
+                btrees: BTreeMap::from([(1, BTreeManifestEntry {
+                    name: "sqlite_master".to_string(),
+                    obj_type: "table".to_string(),
+                    group_ids: vec![0, 1],
+                })]),
+                interior_chunk_keys: BTreeMap::from([(0, "ic-0".to_string())]),
+                index_chunk_keys: BTreeMap::from([(0, "idx-0".to_string())]),
+                subframe_overrides: vec![BTreeMap::new()],
             },
         }
     }
