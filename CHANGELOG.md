@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-04-03
+
+### Phase Signal-a through Signal-e: ManifestStore trait + 4 backends
+- `ManifestStore` trait in `hadb/src/manifest.rs` with `get`/`put`/`meta` and CAS semantics
+- `HaManifest`, `ManifestMeta`, `StorageManifest` (Turbolite + Walrust variants), `FrameEntry`, `BTreeInfo`, `SubframeOverride` types with msgpack + JSON serialization
+- `InMemoryManifestStore` for testing (30 tests: CAS, serialization, boundary values, contract enforcement)
+- `hadb-manifest-s3`: S3 conditional PUTs, HeadObject for cheap `meta()` via custom metadata headers (13 tests)
+- `hadb-manifest-nats`: NATS JetStream KV with native revision CAS (13 tests, verified against real NATS)
+- `hadb-manifest-etcd`: etcd transactions with ModRevision CAS (13 tests)
+- `hadb-manifest-redis`: Lua scripts for atomic CAS, Redis Cluster compatible via hash tags (13 tests)
+- Added `rmp-serde` workspace dependency for msgpack serialization
+
 ## 2026-03-23
 
 ### Phase 1a: Create hadb-io + split hadb-s3
