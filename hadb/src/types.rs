@@ -41,8 +41,9 @@ impl std::fmt::Display for Role {
 /// - `Joined` - Database joined the cluster with the given role
 /// - `Promoted` - Follower was promoted to leader (previous leader died/left)
 /// - `Demoted` - Leader was demoted to follower (lost lease via CAS conflict)
-/// - `Fenced` - Leader lost its lease — must stop serving immediately
+/// - `Fenced` - Leader lost its lease, must stop serving immediately
 /// - `Sleeping` - Leader signaled sleep (e.g., Fly scale-to-zero)
+/// - `ManifestChanged` - Manifest version changed, followers should pull
 #[derive(Debug, Clone)]
 pub enum RoleEvent {
     /// Database joined the cluster with the given role.
@@ -57,6 +58,8 @@ pub enum RoleEvent {
     Fenced { db_name: String },
     /// Leader signaled sleep (e.g., Fly scale-to-zero). Follower should shut down gracefully.
     Sleeping { db_name: String },
+    /// Manifest version changed. Followers should pull new data.
+    ManifestChanged { db_name: String, version: u64 },
 }
 
 /// Configuration for CAS lease coordination.
@@ -111,6 +114,9 @@ pub struct CoordinatorConfig {
     /// Default: 30s. Should be less than lease TTL for safety, but this is
     /// a safety net — self-demotion on renewal errors handles stale leases.
     pub replicator_timeout: Duration,
+    /// How often followers poll ManifestStore for version changes. Default: 1s.
+    /// Only used when a ManifestStore is configured on the Coordinator.
+    pub manifest_poll_interval: Duration,
 }
 
 impl Default for CoordinatorConfig {
@@ -121,6 +127,7 @@ impl Default for CoordinatorConfig {
             lease: None,
             follower_pull_interval: Duration::from_secs(1),
             replicator_timeout: Duration::from_secs(30),
+            manifest_poll_interval: Duration::from_secs(1),
         }
     }
 }
@@ -184,6 +191,10 @@ mod tests {
         let sleeping = RoleEvent::Sleeping {
             db_name: "test".into(),
         };
+        let manifest_changed = RoleEvent::ManifestChanged {
+            db_name: "test".into(),
+            version: 42,
+        };
 
         // Verify they all compile and match their patterns
         match joined {
@@ -204,6 +215,10 @@ mod tests {
         }
         match sleeping {
             RoleEvent::Sleeping { .. } => {}
+            _ => panic!("wrong variant"),
+        }
+        match manifest_changed {
+            RoleEvent::ManifestChanged { version, .. } => assert_eq!(version, 42),
             _ => panic!("wrong variant"),
         }
     }
@@ -246,6 +261,7 @@ mod tests {
         assert!(config.lease.is_none());
         assert_eq!(config.follower_pull_interval, Duration::from_secs(1));
         assert_eq!(config.replicator_timeout, Duration::from_secs(30));
+        assert_eq!(config.manifest_poll_interval, Duration::from_secs(1));
     }
 
     #[test]

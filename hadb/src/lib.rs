@@ -14,6 +14,7 @@
 //! let coordinator = Coordinator::new(
 //!     replicator,              // Arc<dyn Replicator>
 //!     Some(lease_store),       // Option<Arc<dyn LeaseStore>>
+//!     Some(manifest_store),    // Option<Arc<dyn ManifestStore>>
 //!     None,                    // Option<Arc<dyn NodeRegistry>>
 //!     follower_behavior,       // Arc<dyn FollowerBehavior>
 //!     "prefix/",
@@ -38,8 +39,8 @@ pub mod types;
 // Re-export core traits
 pub use traits::{CasResult, LeaseStore, Replicator, StorageBackend};
 pub use manifest::{
-    BTreeInfo, FrameEntry, HaManifest, ManifestMeta, ManifestStore, StorageManifest,
-    SubframeOverride,
+    BTreeInfo, FrameEntry, HaManifest, InMemoryManifestStore, ManifestMeta, ManifestStore,
+    StorageManifest, SubframeOverride,
 };
 pub use types::{CoordinatorConfig, LeaseConfig, Role, RoleEvent};
 pub use metrics::{HaMetrics, MetricsSnapshot};

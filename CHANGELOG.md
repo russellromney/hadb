@@ -2,7 +2,8 @@
 
 ## 2026-04-03
 
-### Phase Signal-a through Signal-e: ManifestStore trait + 4 backends
+### Phase Signal: ManifestStore (complete)
+- Signal-a through Signal-e: trait, types, 4 backends (S3, NATS, etcd, Redis)
 - `ManifestStore` trait in `hadb/src/manifest.rs` with `get`/`put`/`meta` and CAS semantics
 - `HaManifest`, `ManifestMeta`, `StorageManifest` (Turbolite + Walrust variants), `FrameEntry`, `BTreeInfo`, `SubframeOverride` types with msgpack + JSON serialization
 - `InMemoryManifestStore` for testing (30 tests: CAS, serialization, boundary values, contract enforcement)
@@ -11,6 +12,18 @@
 - `hadb-manifest-etcd`: etcd transactions with ModRevision CAS (13 tests)
 - `hadb-manifest-redis`: Lua scripts for atomic CAS, Redis Cluster compatible via hash tags (13 tests)
 - Added `rmp-serde` workspace dependency for msgpack serialization
+- Signal-f: Coordinator integration
+  - `Coordinator` accepts `Option<Arc<dyn ManifestStore>>` (same optional pattern as LeaseStore)
+  - Followers poll `manifest_store.meta()` on configurable interval, emit `ManifestChanged` event on version change
+  - `manifest_poll_interval` config field (default 1s)
+  - `InMemoryManifestStore` made public for integration testing
+  - 8 new tests (accessor, config, join-with-manifest, event variant, polling emits event, no-event-when-unchanged)
+
+### Phase Forge: etcd Lease Store (complete)
+- `hadb-lease-etcd` crate with `EtcdLeaseStore` implementing `LeaseStore` via etcd transactions
+- CAS via `Txn.If(CreateRevision == 0).Then(Put)` and `Txn.If(ModRevision == etag).Then(Put)`
+- Prefixed keys, mod_revision as etag
+- 10 tests (gated by ETCD_ENDPOINTS env var)
 
 ## 2026-03-23
 

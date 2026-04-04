@@ -165,6 +165,7 @@ fn test_coordinator(replicator: &MockReplicator) -> Arc<Coordinator> {
         Arc::new(replicator.clone()),
         None,
         None,
+        None,
         Arc::new(MockFollowerBehavior),
         "test/",
         CoordinatorConfig::default(),
@@ -754,6 +755,7 @@ async fn test_two_engines_one_wins_lease() {
     let replicator2 = MockReplicator::new();
     let coordinator2 = Coordinator::new(
         Arc::new(replicator2.clone()),
+        None,
         None,
         None,
         Arc::new(MockFollowerBehavior),

@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, watch, RwLock};
 
 use crate::coordinator::AtomicRole;
 use crate::lease::DbLease;
+use crate::manifest::ManifestStore;
 use crate::metrics::HaMetrics;
 use crate::node_registry::NodeRegistry;
 use crate::traits::Replicator;
@@ -83,6 +84,8 @@ pub trait FollowerBehavior: Send + Sync {
 pub struct LeaseMonitorContext {
     pub lease: DbLease,
     pub replicator: Arc<dyn Replicator>,
+    pub manifest_store: Option<Arc<dyn ManifestStore>>,
+    pub manifest_poll_interval: Duration,
     pub follower_behavior: Arc<dyn FollowerBehavior>,
     pub prefix: String,
     pub db_name: String,
@@ -111,6 +114,8 @@ pub struct LeaseMonitorContext {
 pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
     let mut interval = tokio::time::interval(ctx.config.follower_poll_interval);
     let mut consecutive_expired: u32 = 0;
+    let mut last_manifest_version: Option<u64> = None;
+    let mut manifest_interval = tokio::time::interval(ctx.manifest_poll_interval);
 
     loop {
         tokio::select! {
@@ -322,6 +327,40 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                     }
                 } else {
                     consecutive_expired = 0;
+                }
+            }
+            _ = manifest_interval.tick(), if ctx.manifest_store.is_some() => {
+                let store = ctx.manifest_store.as_ref().expect("checked by select guard");
+                let manifest_key = format!("{}{}/manifest", ctx.prefix, ctx.db_name);
+                match store.meta(&manifest_key).await {
+                    Ok(Some(meta)) => {
+                        let changed = match last_manifest_version {
+                            Some(prev) => meta.version != prev,
+                            None => true, // first poll, record version but don't emit event
+                        };
+                        if changed && last_manifest_version.is_some() {
+                            tracing::info!(
+                                "Lease monitor '{}': manifest version changed {} -> {}",
+                                ctx.db_name,
+                                last_manifest_version.unwrap_or(0),
+                                meta.version
+                            );
+                            let _ = ctx.role_tx.send(RoleEvent::ManifestChanged {
+                                db_name: ctx.db_name.clone(),
+                                version: meta.version,
+                            });
+                        }
+                        last_manifest_version = Some(meta.version);
+                    }
+                    Ok(None) => {
+                        // No manifest yet, nothing to do.
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Lease monitor '{}': manifest meta poll failed: {}",
+                            ctx.db_name, e
+                        );
+                    }
                 }
             }
             _ = ctx.cancel_rx.changed() => {

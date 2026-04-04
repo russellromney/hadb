@@ -20,6 +20,7 @@ use crate::follower::{run_leader_renewal, run_lease_monitor, FollowerBehavior, L
 use crate::lease::DbLease;
 use crate::metrics::HaMetrics;
 use crate::node_registry::{NodeRegistration, NodeRegistry};
+use crate::manifest::ManifestStore;
 use crate::traits::{LeaseStore, Replicator};
 use crate::types::{CoordinatorConfig, Role, RoleEvent};
 
@@ -70,6 +71,7 @@ struct DbEntry {
 pub struct Coordinator {
     replicator: Arc<dyn Replicator>,
     lease_store: Option<Arc<dyn LeaseStore>>,
+    manifest_store: Option<Arc<dyn ManifestStore>>,
     node_registry: Option<Arc<dyn NodeRegistry>>,
     follower_behavior: Arc<dyn FollowerBehavior>,
     config: CoordinatorConfig,
@@ -84,6 +86,7 @@ impl Coordinator {
     ///
     /// `replicator` handles replication (snapshot + incremental updates).
     /// `lease_store` is for CAS lease operations (None = no HA, always Leader).
+    /// `manifest_store` is for manifest polling and publishing (None = no manifest).
     /// `node_registry` is for read replica discovery (None = no registry).
     /// `follower_behavior` defines database-specific follower pull and promotion logic.
     /// `prefix` is the storage key prefix for all databases (e.g. "wal/" or "ha/").
@@ -91,6 +94,7 @@ impl Coordinator {
     pub fn new(
         replicator: Arc<dyn Replicator>,
         lease_store: Option<Arc<dyn LeaseStore>>,
+        manifest_store: Option<Arc<dyn ManifestStore>>,
         node_registry: Option<Arc<dyn NodeRegistry>>,
         follower_behavior: Arc<dyn FollowerBehavior>,
         prefix: &str,
@@ -101,6 +105,7 @@ impl Coordinator {
         Arc::new(Self {
             replicator,
             lease_store,
+            manifest_store,
             node_registry,
             follower_behavior,
             config,
@@ -415,6 +420,8 @@ impl Coordinator {
             let ctx = LeaseMonitorContext {
                 lease,
                 replicator: self.replicator.clone(),
+                manifest_store: self.manifest_store.clone(),
+                manifest_poll_interval: self.config.manifest_poll_interval,
                 follower_behavior: self.follower_behavior.clone(),
                 prefix: self.prefix.clone(),
                 db_name,
@@ -564,6 +571,15 @@ impl Coordinator {
     /// Get shared metrics reference.
     pub fn metrics(&self) -> &Arc<HaMetrics> {
         &self.metrics
+    }
+
+    /// Get the manifest store, if configured.
+    ///
+    /// Database-specific layers (walrust, turbolite) use this to publish
+    /// manifests after each replication sync. The Coordinator itself only
+    /// polls manifests for followers; publishing is the database layer's job.
+    pub fn manifest_store(&self) -> Option<&Arc<dyn ManifestStore>> {
+        self.manifest_store.as_ref()
     }
 
     /// Discover registered replicas for a database.

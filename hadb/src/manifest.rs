@@ -146,94 +146,95 @@ pub trait ManifestStore: Send + Sync {
 // InMemoryManifestStore (for testing)
 // ============================================================================
 
-#[cfg(test)]
-pub(crate) mod test_store {
-    use super::*;
-    use std::collections::HashMap;
-    use tokio::sync::Mutex;
+use std::collections::HashMap;
+use tokio::sync::Mutex;
 
-    /// In-memory ManifestStore for testing. CAS enforcement on put.
-    pub struct InMemoryManifestStore {
-        data: Mutex<HashMap<String, HaManifest>>,
+/// In-memory ManifestStore for testing. CAS enforcement on put.
+pub struct InMemoryManifestStore {
+    data: Mutex<HashMap<String, HaManifest>>,
+}
+
+impl Default for InMemoryManifestStore {
+    fn default() -> Self {
+        Self::new()
     }
+}
 
-    impl InMemoryManifestStore {
-        pub fn new() -> Self {
-            Self {
-                data: Mutex::new(HashMap::new()),
-            }
-        }
-
-        /// Remove a manifest by key. Test-only (the trait has no delete).
-        pub async fn delete(&self, key: &str) {
-            self.data.lock().await.remove(key);
+impl InMemoryManifestStore {
+    pub fn new() -> Self {
+        Self {
+            data: Mutex::new(HashMap::new()),
         }
     }
 
-    #[async_trait]
-    impl ManifestStore for InMemoryManifestStore {
-        async fn get(&self, key: &str) -> Result<Option<HaManifest>> {
-            Ok(self.data.lock().await.get(key).cloned())
-        }
+    /// Remove a manifest by key. Test-only (the trait has no delete).
+    pub async fn delete(&self, key: &str) {
+        self.data.lock().await.remove(key);
+    }
+}
 
-        async fn put(
-            &self,
-            key: &str,
-            manifest: &HaManifest,
-            expected_version: Option<u64>,
-        ) -> Result<CasResult> {
-            let mut store = self.data.lock().await;
+#[async_trait]
+impl ManifestStore for InMemoryManifestStore {
+    async fn get(&self, key: &str) -> Result<Option<HaManifest>> {
+        Ok(self.data.lock().await.get(key).cloned())
+    }
 
-            match expected_version {
-                None => {
-                    // Must not exist
-                    if store.contains_key(key) {
-                        return Ok(CasResult {
-                            success: false,
-                            etag: None,
-                        });
-                    }
-                    let mut m = manifest.clone();
-                    m.version = 1;
-                    let etag = m.version.to_string();
-                    store.insert(key.to_string(), m);
-                    Ok(CasResult {
-                        success: true,
-                        etag: Some(etag),
-                    })
+    async fn put(
+        &self,
+        key: &str,
+        manifest: &HaManifest,
+        expected_version: Option<u64>,
+    ) -> Result<CasResult> {
+        let mut store = self.data.lock().await;
+
+        match expected_version {
+            None => {
+                // Must not exist
+                if store.contains_key(key) {
+                    return Ok(CasResult {
+                        success: false,
+                        etag: None,
+                    });
                 }
-                Some(expected) => {
-                    let current = store.get(key);
-                    match current {
-                        Some(existing) if existing.version == expected => {
-                            let mut m = manifest.clone();
-                            m.version = expected + 1;
-                            let etag = m.version.to_string();
-                            store.insert(key.to_string(), m);
-                            Ok(CasResult {
-                                success: true,
-                                etag: Some(etag),
-                            })
-                        }
-                        _ => Ok(CasResult {
-                            success: false,
-                            etag: None,
-                        }),
+                let mut m = manifest.clone();
+                m.version = 1;
+                let etag = m.version.to_string();
+                store.insert(key.to_string(), m);
+                Ok(CasResult {
+                    success: true,
+                    etag: Some(etag),
+                })
+            }
+            Some(expected) => {
+                let current = store.get(key);
+                match current {
+                    Some(existing) if existing.version == expected => {
+                        let mut m = manifest.clone();
+                        m.version = expected + 1;
+                        let etag = m.version.to_string();
+                        store.insert(key.to_string(), m);
+                        Ok(CasResult {
+                            success: true,
+                            etag: Some(etag),
+                        })
                     }
+                    _ => Ok(CasResult {
+                        success: false,
+                        etag: None,
+                    }),
                 }
             }
         }
+    }
 
-        async fn meta(&self, key: &str) -> Result<Option<ManifestMeta>> {
-            Ok(self.data.lock().await.get(key).map(ManifestMeta::from))
-        }
+    async fn meta(&self, key: &str) -> Result<Option<ManifestMeta>> {
+        Ok(self.data.lock().await.get(key).map(ManifestMeta::from))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_store::InMemoryManifestStore;
 
     fn make_turbolite_manifest(writer: &str, epoch: u64) -> HaManifest {
         HaManifest {

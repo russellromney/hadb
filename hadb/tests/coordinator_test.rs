@@ -119,6 +119,7 @@ fn test_coordinator(
         Arc::new(replicator.clone()),
         lease_store,
         None,
+        None,
         Arc::new(MockFollowerBehavior),
         "test-prefix",
         config,
@@ -534,4 +535,264 @@ async fn test_drain_all_with_ha() {
     let drained = coordinator.drain_all().await;
     assert_eq!(drained, 2);
     assert_eq!(coordinator.database_count().await, 0);
+}
+
+// ============================================================================
+// Manifest integration tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_manifest_store_accessor_none() {
+    let (coordinator, _) = test_coordinator(None, CoordinatorConfig::default());
+    assert!(coordinator.manifest_store().is_none());
+}
+
+#[tokio::test]
+async fn test_manifest_store_accessor_some() {
+    let replicator = MockReplicator::new();
+    let manifest_store: Arc<dyn ManifestStore> = Arc::new(InMemoryManifestStore::new());
+
+    let coordinator = Coordinator::new(
+        Arc::new(replicator),
+        None,
+        Some(manifest_store),
+        None,
+        Arc::new(MockFollowerBehavior),
+        "test-prefix",
+        CoordinatorConfig::default(),
+    );
+
+    assert!(coordinator.manifest_store().is_some());
+}
+
+#[tokio::test]
+async fn test_manifest_poll_interval_default() {
+    let config = CoordinatorConfig::default();
+    assert_eq!(config.manifest_poll_interval, Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn test_manifest_poll_interval_custom() {
+    let mut config = CoordinatorConfig::default();
+    config.manifest_poll_interval = Duration::from_millis(500);
+    assert_eq!(config.manifest_poll_interval, Duration::from_millis(500));
+}
+
+#[tokio::test]
+async fn test_coordinator_with_manifest_store_joins_as_leader() {
+    let replicator = MockReplicator::new();
+    let manifest_store: Arc<dyn ManifestStore> = Arc::new(InMemoryManifestStore::new());
+
+    let coordinator = Coordinator::new(
+        Arc::new(replicator),
+        None,
+        Some(manifest_store),
+        None,
+        Arc::new(MockFollowerBehavior),
+        "test/",
+        CoordinatorConfig::default(),
+    );
+
+    let db_path = PathBuf::from("/tmp/test.db");
+    let result = coordinator.join("db1", &db_path).await.unwrap();
+    assert_eq!(result.role, Role::Leader);
+}
+
+#[tokio::test]
+async fn test_manifest_changed_event_variant() {
+    let event = RoleEvent::ManifestChanged {
+        db_name: "db1".to_string(),
+        version: 5,
+    };
+    match event {
+        RoleEvent::ManifestChanged { db_name, version } => {
+            assert_eq!(db_name, "db1");
+            assert_eq!(version, 5);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[tokio::test]
+async fn test_manifest_polling_emits_event_on_version_change() {
+    // Set up a coordinator as follower with a manifest store.
+    let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+    let manifest_store = Arc::new(InMemoryManifestStore::new());
+
+    // Pre-claim the lease so our coordinator joins as follower.
+    lease_store
+        .write_if_not_exists(
+            "test-prefix/ha_db1/_lease.json",
+            serde_json::to_vec(&serde_json::json!({
+                "instance_id": "other-node",
+                "address": "10.0.0.99:8080",
+                "ttl_secs": 300,
+                "session_id": "sess-1",
+                "sleeping": false,
+                "claimed_at": chrono::Utc::now().timestamp()
+            })).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut config = CoordinatorConfig::default();
+    config.manifest_poll_interval = Duration::from_millis(50);
+    config.lease = Some(LeaseConfig::new(
+        "instance-1".into(),
+        "127.0.0.1:8080".into(),
+    ));
+
+    let replicator = MockReplicator::new();
+    let coordinator = Coordinator::new(
+        Arc::new(replicator),
+        Some(lease_store),
+        Some(manifest_store.clone() as Arc<dyn ManifestStore>),
+        None,
+        Arc::new(MockFollowerBehavior),
+        "test-prefix/",
+        config,
+    );
+
+    let mut events = coordinator.role_events();
+    let db_path = PathBuf::from("/tmp/test_manifest_poll.db");
+    let result = coordinator.join("ha_db1", &db_path).await.unwrap();
+    assert_eq!(result.role, Role::Follower);
+
+    // Consume the Joined event.
+    let joined = events.recv().await.unwrap();
+    assert!(matches!(joined, RoleEvent::Joined { role: Role::Follower, .. }));
+
+    // Publish initial manifest (v1) so the poll establishes a baseline.
+    let manifest = HaManifest {
+        version: 0,
+        writer_id: "other-node".to_string(),
+        lease_epoch: 1,
+        timestamp_ms: 1000,
+        storage: StorageManifest::Walrust {
+            txid: 1,
+            changeset_prefix: "cs/".to_string(),
+            latest_changeset_key: "cs/1".to_string(),
+            snapshot_key: None,
+            snapshot_txid: None,
+        },
+    };
+    manifest_store
+        .put("test-prefix/ha_db1/manifest", &manifest, None)
+        .await
+        .unwrap();
+
+    // Wait for the poll to see v1 and record it as baseline (no event on first sight).
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Publish v2. The poll should detect the change and emit ManifestChanged.
+    manifest_store
+        .put("test-prefix/ha_db1/manifest", &manifest, Some(1))
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("should receive ManifestChanged within 2s")
+        .unwrap();
+
+    match event {
+        RoleEvent::ManifestChanged { db_name, version } => {
+            assert_eq!(db_name, "ha_db1");
+            assert_eq!(version, 2);
+        }
+        other => panic!("expected ManifestChanged, got {:?}", other),
+    }
+
+    // Publish v3. Should emit another ManifestChanged.
+    manifest_store
+        .put("test-prefix/ha_db1/manifest", &manifest, Some(2))
+        .await
+        .unwrap();
+
+    let event2 = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("should receive second ManifestChanged within 2s")
+        .unwrap();
+
+    match event2 {
+        RoleEvent::ManifestChanged { db_name, version } => {
+            assert_eq!(db_name, "ha_db1");
+            assert_eq!(version, 3);
+        }
+        other => panic!("expected ManifestChanged v3, got {:?}", other),
+    }
+
+    coordinator.leave("ha_db1").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manifest_polling_no_event_when_version_unchanged() {
+    let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+    let manifest_store = Arc::new(InMemoryManifestStore::new());
+
+    // Pre-claim lease so we join as follower.
+    lease_store
+        .write_if_not_exists(
+            "test-prefix/ha_db1/_lease.json",
+            serde_json::to_vec(&serde_json::json!({
+                "instance_id": "other-node",
+                "address": "10.0.0.99:8080",
+                "ttl_secs": 300,
+                "session_id": "sess-1",
+                "sleeping": false,
+                "claimed_at": chrono::Utc::now().timestamp()
+            })).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Pre-publish a manifest before joining, so the first poll sees version 1.
+    let manifest = HaManifest {
+        version: 0,
+        writer_id: "other-node".to_string(),
+        lease_epoch: 1,
+        timestamp_ms: 1000,
+        storage: StorageManifest::Walrust {
+            txid: 1,
+            changeset_prefix: "cs/".to_string(),
+            latest_changeset_key: "cs/1".to_string(),
+            snapshot_key: None,
+            snapshot_txid: None,
+        },
+    };
+    manifest_store
+        .put("test-prefix/ha_db1/manifest", &manifest, None)
+        .await
+        .unwrap();
+
+    let mut config = CoordinatorConfig::default();
+    config.manifest_poll_interval = Duration::from_millis(50);
+    config.lease = Some(LeaseConfig::new(
+        "instance-1".into(),
+        "127.0.0.1:8080".into(),
+    ));
+
+    let replicator = MockReplicator::new();
+    let coordinator = Coordinator::new(
+        Arc::new(replicator),
+        Some(lease_store),
+        Some(manifest_store as Arc<dyn ManifestStore>),
+        None,
+        Arc::new(MockFollowerBehavior),
+        "test-prefix/",
+        config,
+    );
+
+    let mut events = coordinator.role_events();
+    let db_path = PathBuf::from("/tmp/test_manifest_noevent.db");
+    coordinator.join("ha_db1", &db_path).await.unwrap();
+
+    // Consume Joined event.
+    let _ = events.recv().await.unwrap();
+
+    // Wait several poll intervals. No manifest change, so no ManifestChanged event.
+    let result = tokio::time::timeout(Duration::from_millis(300), events.recv()).await;
+    assert!(result.is_err(), "should not receive any event when version is unchanged");
+
+    coordinator.leave("ha_db1").await.unwrap();
 }

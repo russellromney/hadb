@@ -15,6 +15,7 @@ use hadb::{Coordinator, CoordinatorConfig, LeaseConfig};
 let coordinator = Coordinator::new(
     replicator,          // Arc<dyn Replicator>
     Some(lease_store),   // Option<Arc<dyn LeaseStore>>
+    Some(manifest_store),// Option<Arc<dyn ManifestStore>>
     Some(registry),      // Option<Arc<dyn NodeRegistry>>
     follower_behavior,   // Arc<dyn FollowerBehavior>
     "prefix/",
