@@ -10,7 +10,7 @@ keywords = ["ha", "redis", "manifest", "coordination"]
 categories = ["database", "network-programming"]
 
 [dependencies]
-hadb = { path = "../hadb", version = "0.3.1" }
+hadb = { path = "../hadb", version = "0.4.0" }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 async-trait = { workspace = true }
 anyhow = { workspace = true }

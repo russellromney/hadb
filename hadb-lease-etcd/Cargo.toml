@@ -1,6 +1,6 @@
 [package]
 name = "hadb-lease-etcd"
-version = "0.3.1"
+version = "0.4.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ repository.workspace = true
 description = "etcd lease store for hadb -- zero-infra HA on Kubernetes"
 
 [dependencies]
-hadb = { path = "../hadb", version = "0.3.1" }
+hadb = { path = "../hadb", version = "0.4.0" }
 etcd-client = "0.18"
 async-trait.workspace = true
 anyhow.workspace = true
