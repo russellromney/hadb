@@ -101,46 +101,8 @@ pub struct SubframeOverride {
     pub entry: FrameEntry,
 }
 
-// ============================================================================
-// ManifestStore trait
-// ============================================================================
-
-/// Trait for manifest storage with CAS semantics.
-///
-/// Same pattern as LeaseStore: trait in hadb, implementations in
-/// hadb-manifest-s3, hadb-manifest-nats, etc.
-///
-/// Three methods:
-/// - `get`: full manifest fetch (used on catch-up)
-/// - `put`: CAS publish with version fencing
-/// - `meta`: lightweight HEAD for cheap polling
-#[async_trait]
-pub trait ManifestStore: Send + Sync {
-    /// Fetch the full manifest for a key. Returns None if no manifest exists.
-    async fn get(&self, key: &str) -> Result<Option<HaManifest>>;
-
-    /// Publish a new manifest with CAS on expected_version.
-    ///
-    /// - `expected_version: None` means the key must not exist (first publish).
-    /// - `expected_version: Some(v)` means the current version must equal v.
-    ///
-    /// The `version` field in the provided manifest is ignored; the store
-    /// assigns the next version (1 for first publish, expected_version + 1
-    /// for updates). Implementors must enforce this.
-    ///
-    /// Returns CasResult { success: true, .. } on success, or
-    /// CasResult { success: false, .. } on version mismatch.
-    async fn put(
-        &self,
-        key: &str,
-        manifest: &HaManifest,
-        expected_version: Option<u64>,
-    ) -> Result<CasResult>;
-
-    /// Cheap metadata check without fetching the full storage payload.
-    /// Returns version + leadership info for fencing.
-    async fn meta(&self, key: &str) -> Result<Option<ManifestMeta>>;
-}
+// ManifestStore trait is in traits.rs alongside LeaseStore.
+pub use crate::traits::ManifestStore;
 
 // ============================================================================
 // InMemoryManifestStore (for testing)

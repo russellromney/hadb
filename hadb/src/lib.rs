@@ -37,9 +37,9 @@ pub mod traits;
 pub mod types;
 
 // Re-export core traits
-pub use traits::{CasResult, LeaseStore, Replicator, StorageBackend};
+pub use traits::{CasResult, LeaseStore, ManifestStore, Replicator, StorageBackend};
 pub use manifest::{
-    BTreeInfo, FrameEntry, HaManifest, InMemoryManifestStore, ManifestMeta, ManifestStore,
+    BTreeInfo, FrameEntry, HaManifest, InMemoryManifestStore, ManifestMeta,
     StorageManifest, SubframeOverride,
 };
 pub use types::{CoordinatorConfig, LeaseConfig, Role, RoleEvent};
