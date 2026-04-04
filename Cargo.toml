@@ -1,5 +1,16 @@
 [workspace]
-members = ["hadb", "hadb-io", "hadb-lease-s3", "hadb-lease-nats", "hadb-lease-etcd", "hadb-cli"]
+members = [
+    "hadb",
+    "hadb-io",
+    "hadb-lease-s3",
+    "hadb-lease-nats",
+    "hadb-lease-etcd",
+    "hadb-manifest-s3",
+    "hadb-manifest-nats",
+    "hadb-manifest-etcd",
+    "hadb-manifest-redis",
+    "hadb-cli",
+]
 resolver = "2"
 
 [workspace.package]
@@ -17,6 +28,7 @@ async-trait = "0.1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rmp-serde = "1"
 
 # Utilities
 anyhow = "1"
