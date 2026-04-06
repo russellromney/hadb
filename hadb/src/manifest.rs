@@ -70,6 +70,9 @@ pub enum StorageManifest {
         interior_chunk_keys: BTreeMap<u32, String>,
         index_chunk_keys: BTreeMap<u32, String>,
         subframe_overrides: Vec<BTreeMap<usize, SubframeOverride>>,
+        /// Full page 0 content for multiwriter catch-up. Optional for backward compat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        db_header: Option<Vec<u8>>,
     },
     Walrust {
         txid: u64,
