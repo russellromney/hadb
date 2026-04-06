@@ -58,6 +58,9 @@ impl From<&HaManifest> for ManifestMeta {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StorageManifest {
     Turbolite {
+        /// turbolite manifest version (for S3 key uniqueness: pg/{gid}_v{version})
+        #[serde(default)]
+        turbolite_version: u64,
         page_count: u64,
         page_size: u32,
         pages_per_group: u32,
@@ -79,6 +82,8 @@ pub enum StorageManifest {
     /// WAL frames since last turbolite checkpoint. No walrust snapshots needed.
     TurboliteWalrust {
         // turbolite base state (same fields as Turbolite variant)
+        #[serde(default)]
+        turbolite_version: u64,
         page_count: u64,
         page_size: u32,
         pages_per_group: u32,
