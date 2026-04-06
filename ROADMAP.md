@@ -269,7 +269,7 @@ walrust 0.3.0 on crates.io has stale exports (`ReplicationConfig`, `pull_increme
 
 ### NATS deployment
 
-Deploy single NATS server on Fly (~$2/month, shared-cpu-1x-256mb). Wire into cinch engines via `WAL_LEASE_NATS_URL`. The crate and integration exist; just needs a running server.
+Deploy single NATS server on Fly (~$2/month, shared-cpu-1x-256mb). Wire into consumer engines via `WAL_LEASE_NATS_URL`. The crate and integration exist; just needs a running server.
 
 ---
 
