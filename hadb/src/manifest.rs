@@ -74,6 +74,29 @@ pub enum StorageManifest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         db_header: Option<Vec<u8>>,
     },
+    /// Hybrid: turbolite page groups as base state + walrust WAL frames as deltas.
+    /// turbolite page groups in S3 = full database. walrust changesets = incremental
+    /// WAL frames since last turbolite checkpoint. No walrust snapshots needed.
+    TurboliteWalrust {
+        // turbolite base state (same fields as Turbolite variant)
+        page_count: u64,
+        page_size: u32,
+        pages_per_group: u32,
+        sub_pages_per_frame: u32,
+        strategy: String,
+        page_group_keys: Vec<String>,
+        frame_tables: Vec<Vec<FrameEntry>>,
+        group_pages: Vec<Vec<u64>>,
+        btrees: BTreeMap<u64, BTreeManifestEntry>,
+        interior_chunk_keys: BTreeMap<u32, String>,
+        index_chunk_keys: BTreeMap<u32, String>,
+        subframe_overrides: Vec<BTreeMap<usize, SubframeOverride>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        db_header: Option<Vec<u8>>,
+        // walrust delta position
+        walrust_txid: u64,
+        walrust_changeset_prefix: String,
+    },
     Walrust {
         txid: u64,
         changeset_prefix: String,
