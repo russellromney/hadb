@@ -210,6 +210,15 @@ impl Coordinator {
 
         match role {
             Role::Leader => {
+                // Restore from S3 first: a previous leader may have written
+                // data that this node doesn't have locally. pull() is a no-op
+                // if no snapshot exists (first-ever leader).
+                let _ = tokio::time::timeout(
+                    self.config.replicator_timeout,
+                    self.replicator.pull(name, db_path),
+                )
+                .await;
+
                 // Start leader sync.
                 tokio::time::timeout(
                     self.config.replicator_timeout,
