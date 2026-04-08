@@ -240,10 +240,12 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                                 }
                             }
 
-                            // 3. Start leader sync (snapshot + WAL push).
+                            // 3. Resume leader sync, continuing from existing S3 seq.
+                            // add_continuing() loads state.json to get the right seq
+                            // so followers can discover new changesets.
                             let add_result = tokio::time::timeout(
                                 ctx.replicator_timeout,
-                                ctx.replicator.add(&ctx.db_name, &ctx.db_path),
+                                ctx.replicator.add_continuing(&ctx.db_name, &ctx.db_path),
                             ).await;
                             match add_result {
                                 Ok(Ok(())) => {}

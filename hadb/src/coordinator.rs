@@ -766,15 +766,16 @@ impl Coordinator {
         // Cancel any running follower task
         let _ = entry.cancel_tx.send(true);
 
-        // Restart replication as Leader
+        // Resume replication as leader, continuing from the existing S3 seq
+        // so followers can discover new changesets via discover_after().
         tokio::time::timeout(
             self.config.replicator_timeout,
-            self.replicator.add(name, &entry.db_path),
+            self.replicator.add_continuing(name, &entry.db_path),
         )
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "Coordinator: replicator.add('{}') timed out during promote after {:?}",
+                "Coordinator: replicator.add_continuing('{}') timed out during promote after {:?}",
                 name,
                 self.config.replicator_timeout
             )

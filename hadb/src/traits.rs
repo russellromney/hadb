@@ -38,6 +38,16 @@ pub trait Replicator: Send + Sync {
     /// background sync and clean up resources.
     async fn remove(&self, name: &str) -> Result<()>;
 
+    /// Resume replication as leader after promotion from follower.
+    ///
+    /// Unlike add(), this continues from the existing seq counter in S3
+    /// so followers can discover new changesets via discover_after(). Skips
+    /// snapshot upload since the promoted node already has the data.
+    /// Default: falls back to add().
+    async fn add_continuing(&self, name: &str, path: &Path) -> Result<()> {
+        self.add(name, path).await
+    }
+
     /// Force sync to storage (for graceful shutdown).
     ///
     /// Called during graceful leader handoff. Should flush all pending
