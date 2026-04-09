@@ -9,7 +9,7 @@ The goal is high availability with better economics for multi-database workloads
 S3 provides impressive primitives:
 
 - **Strong consistency** (since 2020) -- linearizable reads after writes
-- **Conditional PUTs** (ETags) -- compare-and-swap for leader election
+- **Conditional PUTs** (ETags) -- compare-and-swap for leader election (AWS S3 only; Tigris does not enforce atomic conditional PUTs for concurrent requests)
 - **11 nines durability, 99.99% availability**
 - **~$0.02/GB/month**
 
@@ -115,7 +115,7 @@ All crates published to [crates.io](https://crates.io/crates/hadb).
 **Core (hadb workspace):**
 - [**hadb**](https://github.com/russellromney/hadb/tree/main/hadb) -- Coordination framework. Leader election, role management, follower readiness, ShardedLeaseStore. Stable.
 - [**hadb-io**](https://github.com/russellromney/hadb/tree/main/hadb-io) -- Shared infrastructure. ObjectStore trait, S3 client, retry/circuit breaker, concurrent uploads, webhooks, GFS retention. Stable.
-- [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) -- S3 lease store via conditional PUTs. Production-ready.
+- [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) -- S3 lease store via conditional PUTs. Works on AWS S3. **Not compatible with Tigris** (conditional PUTs are not atomic for concurrent requests).
 - [**hadb-lease-nats**](https://github.com/russellromney/hadb/tree/main/hadb-lease-nats) -- NATS JetStream KV lease store. 20-50x faster than S3. Tested against real NATS.
 - [**hadb-lease-etcd**](https://github.com/russellromney/hadb/tree/main/hadb-lease-etcd) -- etcd lease store via KV transactions. Zero new infra on Kubernetes. Tested against real etcd.
 - [**hadb-cli**](https://github.com/russellromney/hadb/tree/main/hadb-cli) -- Shared CLI framework (args, config, commands). Used by haqlite.
@@ -174,7 +174,7 @@ turbo{db} implementations follow the [turbodb spec](turbodb/). They work indepen
 
 ### Fast lease stores
 
-S3 conditional PUTs work but have ~50-200ms latency per operation and charge per request. At scale (1000 databases, lease check every 2s), that's about $17/month just for lease polling, growing linearly with engines and databases. For faster failover and zero per-request cost, swap the `LeaseStore` implementation. S3 remains the storage backend for durability; these are just the fast path for coordination. Start with a single NATS node (about $2/month), cluster for HA.
+S3 conditional PUTs work on AWS S3 but have ~50-200ms latency per operation and charge per request. **Note:** Tigris S3 does not enforce atomic conditional PUTs for concurrent requests, so hadb-lease-s3 is not safe on Tigris. Use NATS or another lease store instead. At scale (1000 databases, lease check every 2s), that's about $17/month just for lease polling, growing linearly with engines and databases. For faster failover and zero per-request cost, swap the `LeaseStore` implementation. S3 remains the storage backend for durability; these are just the fast path for coordination. Start with a single NATS node (about $2/month), cluster for HA.
 
 **hadb-lease-nats** ([crates.io](https://crates.io/crates/hadb-lease-nats)) -- NATS JetStream KV with CAS for leader election. 2-5ms per operation. Lightweight self-hosted Raft (single binary, ~30MB RAM per node). Recommended fast path. Start with 1 node, add 2 more for HA when needed.
 
