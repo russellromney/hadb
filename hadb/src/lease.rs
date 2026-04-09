@@ -1,6 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
@@ -168,7 +166,6 @@ impl DbLease {
 
     /// Try to create a new lease (key doesn't exist).
     async fn try_claim_new(&mut self) -> Result<Role> {
-        // Generate a new session ID for this claim
         self.session_id = uuid::Uuid::new_v4().to_string();
 
         let body = serde_json::to_vec(&self.make_lease())?;
@@ -179,9 +176,8 @@ impl DbLease {
 
         if result.success {
             self.current_etag = result.etag;
-            self.post_claim_verify().await
+            Ok(Role::Leader)
         } else {
-            // Someone else created it between our read and write.
             Ok(Role::Follower)
         }
     }
@@ -196,49 +192,9 @@ impl DbLease {
 
         if result.success {
             self.current_etag = result.etag;
-            self.post_claim_verify().await
+            Ok(Role::Leader)
         } else {
-            // Someone else took over the expired lease first.
             Ok(Role::Follower)
-        }
-    }
-
-    /// Post-claim verification: sleep with jitter then read back.
-    ///
-    /// Handles backends like Tigris that don't enforce conditional PUTs.
-    /// The jitter ensures concurrent claimants read after all writes complete,
-    /// and strong read consistency means both see the same last-writer-wins result.
-    async fn post_claim_verify(&mut self) -> Result<Role> {
-        let jitter_ms = {
-            use rand::Rng;
-            rand::thread_rng().gen_range(50..200)
-        };
-        tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
-
-        match self.read().await? {
-            Some((lease, read_etag)) => {
-                if lease.instance_id == self.instance_id
-                    && lease.session_id == self.session_id
-                {
-                    self.current_etag = Some(read_etag);
-                    Ok(Role::Leader)
-                } else {
-                    tracing::warn!(
-                        "Post-claim verify failed: lease held by {}:{} (not us: {}:{})",
-                        lease.instance_id,
-                        lease.session_id,
-                        self.instance_id,
-                        self.session_id,
-                    );
-                    self.current_etag = None;
-                    Ok(Role::Follower)
-                }
-            }
-            None => {
-                tracing::warn!("Post-claim verify: lease vanished after write");
-                self.current_etag = None;
-                Ok(Role::Follower)
-            }
         }
     }
 
