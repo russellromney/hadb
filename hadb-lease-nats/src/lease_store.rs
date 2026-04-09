@@ -327,6 +327,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_concurrent_create_is_atomic() {
+        let Some(f) = TestFixture::new().await else { return };
+
+        // Spawn 10 concurrent tasks all trying to create the same key
+        let mut handles = vec![];
+        for i in 0..10u32 {
+            let store_clone = NatsLeaseStore::new(f.store.store.clone());
+            handles.push(tokio::spawn(async move {
+                store_clone
+                    .write_if_not_exists("race-key", format!("writer-{}", i).into_bytes())
+                    .await
+            }));
+        }
+
+        let mut successes = 0;
+        let mut failures = 0;
+        for h in handles {
+            match h.await.unwrap() {
+                Ok(cas) if cas.success => successes += 1,
+                Ok(_) => failures += 1,
+                Err(e) => panic!("unexpected error: {}", e),
+            }
+        }
+
+        // Exactly one writer must succeed
+        assert_eq!(successes, 1, "expected exactly 1 success, got {successes}");
+        assert_eq!(failures, 9, "expected exactly 9 failures, got {failures}");
+
+        // Read back: should see one of the writers' data
+        let (data, _etag) = f.read("race-key").await.unwrap().unwrap();
+        let value = String::from_utf8(data).unwrap();
+        assert!(value.starts_with("writer-"), "unexpected value: {value}");
+
+        f.cleanup().await;
+    }
+
+    #[tokio::test]
     async fn test_etag_is_numeric_revision() {
         let Some(f) = TestFixture::new().await else { return };
 
