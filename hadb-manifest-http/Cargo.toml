@@ -1,0 +1,25 @@
+[package]
+name = "hadb-manifest-http"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP manifest store for hadb"
+keywords = ["ha", "http", "manifest", "coordination"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+hadb = { path = "../hadb", version = "0.4.0" }
+async-trait.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+uuid.workspace = true
+rmp-serde.workspace = true

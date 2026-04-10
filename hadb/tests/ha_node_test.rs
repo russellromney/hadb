@@ -799,14 +799,17 @@ async fn test_engine_lease_loss_demotes_all_databases() {
     // All databases should transition from Follower to Leader.
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
 
-    // Pre-claim with a very short TTL (1 second)
+    // Pre-claim with a TTL long enough to survive test setup overhead (5 seconds)
+    // The TTL must be long enough that the lease is still valid when node.start()
+    // attempts its initial claim, accounting for async setup time between
+    // pre-claim and node.start().
     let mut other_lease = DbLease::new(
         lease_store.clone(),
         "test/",
         "__engine__",
         "other-engine",
         "10.0.0.2:6379",
-        1, // 1 second TTL
+        5, // 5 second TTL (was 1, which could expire before node.start())
     );
     other_lease.try_claim().await.unwrap();
 

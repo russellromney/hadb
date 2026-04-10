@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Database role in the HA cluster.
@@ -117,6 +118,10 @@ pub struct CoordinatorConfig {
     /// How often followers poll ManifestStore for version changes. Default: 1s.
     /// Only used when a ManifestStore is configured on the Coordinator.
     pub manifest_poll_interval: Duration,
+    /// Shared fence token, updated by DbLease on acquire/renew.
+    /// Storage clients read this to include Fence-Token on writes.
+    /// None = no fence enforcement (backward compat).
+    pub fence_token: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl Default for CoordinatorConfig {
@@ -128,6 +133,7 @@ impl Default for CoordinatorConfig {
             follower_pull_interval: Duration::from_secs(1),
             replicator_timeout: Duration::from_secs(30),
             manifest_poll_interval: Duration::from_secs(1),
+            fence_token: None,
         }
     }
 }

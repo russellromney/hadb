@@ -178,6 +178,9 @@ impl Coordinator {
             &lease_config.address,
             lease_config.ttl_secs,
         );
+        if let Some(ref ft) = self.config.fence_token {
+            lease = lease.with_fence_token(ft.clone());
+        }
 
         self.metrics.inc(&self.metrics.lease_claims_attempted);
         let role = lease.try_claim().await?;

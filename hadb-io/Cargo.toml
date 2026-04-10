@@ -46,3 +46,7 @@ hex = "0.4"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
+proptest = { workspace = true }
+proptest-derive = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }

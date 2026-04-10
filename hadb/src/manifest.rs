@@ -260,6 +260,8 @@ mod tests {
                 interior_chunk_keys: BTreeMap::from([(0, "ic-0".to_string())]),
                 index_chunk_keys: BTreeMap::from([(0, "idx-0".to_string())]),
                 subframe_overrides: vec![BTreeMap::new()],
+                turbolite_version: 0,
+                db_header: None,
             },
         }
     }
@@ -454,6 +456,8 @@ mod tests {
             interior_chunk_keys: BTreeMap::from([(0, "ic".to_string())]),
             index_chunk_keys: BTreeMap::new(),
             subframe_overrides: vec![],
+            turbolite_version: 0,
+            db_header: None,
         };
         let bytes = rmp_serde::to_vec(&storage).expect("serialize");
         let decoded: StorageManifest = rmp_serde::from_slice(&bytes).expect("deserialize");
@@ -671,6 +675,8 @@ mod tests {
                 interior_chunk_keys: BTreeMap::new(),
                 index_chunk_keys: BTreeMap::new(),
                 subframe_overrides: vec![],
+                turbolite_version: 0,
+                db_header: None,
             },
         };
 
@@ -818,6 +824,7 @@ mod tests {
                 interior_chunk_keys,
                 index_chunk_keys,
                 subframe_overrides,
+                ..
             } => {
                 assert_eq!(*page_count, 100);
                 assert_eq!(*page_size, 4096);

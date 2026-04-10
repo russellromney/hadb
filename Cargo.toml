@@ -5,10 +5,12 @@ members = [
     "hadb-lease-s3",
     "hadb-lease-nats",
     "hadb-lease-etcd",
+    "hadb-lease-http",
     "hadb-manifest-s3",
     "hadb-manifest-nats",
     "hadb-manifest-etcd",
     "hadb-manifest-redis",
+    "hadb-manifest-http",
     "hadb-cli",
 ]
 resolver = "2"
@@ -40,3 +42,8 @@ rand = "0.8"
 # HTTP
 axum = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
+base64 = "0.22"
+
+# Testing
+proptest = "1.5"
+proptest-derive = "0.5"

@@ -17,6 +17,8 @@ pub mod storage;
 pub mod uploader;
 pub mod webhook;
 
+pub mod http_storage;
+
 #[cfg(feature = "s3")]
 pub mod s3;
 
@@ -33,6 +35,7 @@ pub use retry::{
     RetryPolicy, classify_error, is_retryable,
 };
 pub use storage::ObjectStore;
+pub use http_storage::HttpObjectStore;
 pub use uploader::{ConcurrentUploader, UploadHandler, UploadMessage, UploaderStats, spawn_uploader};
 pub use webhook::{WebhookEvent, WebhookPayload, WebhookSender, compute_hmac_signature};
 
