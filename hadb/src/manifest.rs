@@ -126,11 +126,6 @@ pub enum StorageManifest {
         /// Followers replay journal entries after this sequence.
         #[serde(default)]
         journal_seq: u64,
-        /// Raw turbograph-internal manifest JSON (Phase GraphBridge).
-        /// Opaque blob passed directly to turbograph_set_manifest() on followers.
-        /// Empty = not available (backward compat with pre-GraphBridge manifests).
-        #[serde(default, skip_serializing_if = "String::is_empty")]
-        manifest_json: String,
     },
     /// Hybrid: turbograph page groups as base state + graphstream journal deltas.
     TurbographGraphstream {
@@ -158,6 +153,10 @@ pub enum StorageManifest {
 pub struct FrameEntry {
     pub offset: u64,
     pub len: u32,
+    /// Actual number of pages encoded in this frame.
+    /// Used by turbograph for seekable sub-frames. 0 = legacy format.
+    #[serde(default)]
+    pub page_count: u32,
 }
 
 /// B-tree metadata with group associations for a turbolite page group.
@@ -485,8 +484,8 @@ mod tests {
             strategy: "BTreeAware".to_string(),
             page_group_keys: vec!["a".into(), "b".into()],
             frame_tables: vec![vec![
-                FrameEntry { offset: 0, len: 4096 },
-                FrameEntry { offset: 4096, len: 4096 },
+                FrameEntry { offset: 0, len: 4096, page_count: 0 },
+                FrameEntry { offset: 4096, len: 4096, page_count: 0 },
             ]],
             group_pages: vec![vec![1, 2]],
             btrees: BTreeMap::from([(1, BTreeManifestEntry {
@@ -939,11 +938,10 @@ mod tests {
                 pages_per_group: 4096,
                 sub_pages_per_frame: 4,
                 page_group_keys: vec!["pg/0_v5".to_string(), "pg/1_v5".to_string()],
-                frame_tables: vec![vec![FrameEntry { offset: 0, len: 8192 }]],
+                frame_tables: vec![vec![FrameEntry { offset: 0, len: 8192, page_count: 0 }]],
                 subframe_overrides: vec![BTreeMap::new()],
                 encrypted: false,
                 journal_seq: 42,
-                manifest_json: String::new(),
             },
         }
     }
@@ -961,12 +959,12 @@ mod tests {
                 pages_per_group: 4096,
                 sub_pages_per_frame: 4,
                 page_group_keys: vec!["pg/0_v7".to_string()],
-                frame_tables: vec![vec![FrameEntry { offset: 0, len: 16384 }]],
+                frame_tables: vec![vec![FrameEntry { offset: 0, len: 16384, page_count: 0 }]],
                 subframe_overrides: vec![BTreeMap::from([(
                     0,
                     SubframeOverride {
                         key: "pg/0_f0_v7".to_string(),
-                        entry: FrameEntry { offset: 0, len: 4096 },
+                        entry: FrameEntry { offset: 0, len: 4096, page_count: 0 },
                     },
                 )])],
                 encrypted: true,
@@ -1030,7 +1028,6 @@ mod tests {
                 subframe_overrides,
                 journal_seq,
                 encrypted,
-                manifest_json,
             } => {
                 assert_eq!(*turbograph_version, 5);
                 assert_eq!(*page_count, 200);
@@ -1045,10 +1042,9 @@ mod tests {
                 );
                 assert_eq!(
                     frame_tables,
-                    &vec![vec![FrameEntry { offset: 0, len: 8192 }]]
+                    &vec![vec![FrameEntry { offset: 0, len: 8192, page_count: 0 }]]
                 );
                 assert_eq!(subframe_overrides, &vec![BTreeMap::new()]);
-                assert!(manifest_json.is_empty(), "manifest_json should be empty by default");
             }
             _ => panic!("expected Turbograph variant"),
         }
@@ -1090,12 +1086,12 @@ mod tests {
                 );
                 assert_eq!(
                     frame_tables,
-                    &vec![vec![FrameEntry { offset: 0, len: 16384 }]]
+                    &vec![vec![FrameEntry { offset: 0, len: 16384, page_count: 0 }]]
                 );
                 assert_eq!(subframe_overrides.len(), 1);
                 let ovr = subframe_overrides[0].get(&0).expect("subframe 0 override");
                 assert_eq!(ovr.key, "pg/0_f0_v7");
-                assert_eq!(ovr.entry, FrameEntry { offset: 0, len: 4096 });
+                assert_eq!(ovr.entry, FrameEntry { offset: 0, len: 4096, page_count: 0 });
             }
             _ => panic!("expected TurbographGraphstream variant"),
         }
@@ -1252,7 +1248,6 @@ mod tests {
                 subframe_overrides: vec![],
                 encrypted: false,
                 journal_seq: 0,
-                manifest_json: String::new(),
             },
         };
         let bytes = rmp_serde::to_vec(&m).expect("serialize");
