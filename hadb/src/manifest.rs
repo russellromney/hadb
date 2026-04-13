@@ -126,6 +126,11 @@ pub enum StorageManifest {
         /// Followers replay journal entries after this sequence.
         #[serde(default)]
         journal_seq: u64,
+        /// Raw turbograph-internal manifest JSON (Phase GraphBridge).
+        /// Opaque blob passed directly to turbograph_set_manifest() on followers.
+        /// Empty = not available (backward compat with pre-GraphBridge manifests).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        manifest_json: String,
     },
     /// Hybrid: turbograph page groups as base state + graphstream journal deltas.
     TurbographGraphstream {
@@ -938,6 +943,7 @@ mod tests {
                 subframe_overrides: vec![BTreeMap::new()],
                 encrypted: false,
                 journal_seq: 42,
+                manifest_json: String::new(),
             },
         }
     }
@@ -1024,6 +1030,7 @@ mod tests {
                 subframe_overrides,
                 journal_seq,
                 encrypted,
+                manifest_json,
             } => {
                 assert_eq!(*turbograph_version, 5);
                 assert_eq!(*page_count, 200);
@@ -1041,6 +1048,7 @@ mod tests {
                     &vec![vec![FrameEntry { offset: 0, len: 8192 }]]
                 );
                 assert_eq!(subframe_overrides, &vec![BTreeMap::new()]);
+                assert!(manifest_json.is_empty(), "manifest_json should be empty by default");
             }
             _ => panic!("expected Turbograph variant"),
         }
@@ -1244,6 +1252,7 @@ mod tests {
                 subframe_overrides: vec![],
                 encrypted: false,
                 journal_seq: 0,
+                manifest_json: String::new(),
             },
         };
         let bytes = rmp_serde::to_vec(&m).expect("serialize");
