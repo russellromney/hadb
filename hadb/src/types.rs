@@ -24,6 +24,10 @@ pub enum Durability {
     Replicated,
     /// Page-level S3 tiering (turbolite / turbograph S3Primary). RPO = 0.
     Synchronous,
+    /// Hybrid: page-level S3 base state + replication log deltas between checkpoints.
+    /// Combines Synchronous durability with Replicated catch-up speed.
+    /// Used by haqlite (turbolite + walrust) for the best of both worlds.
+    Eventual,
 }
 
 impl Default for HaMode {
@@ -48,24 +52,31 @@ impl std::fmt::Display for Durability {
         match self {
             Durability::Replicated => write!(f, "Replicated"),
             Durability::Synchronous => write!(f, "Synchronous"),
+            Durability::Eventual => write!(f, "Eventual"),
         }
     }
 }
 
 /// Validate a mode + durability combination.
 ///
-/// Shared + Replicated is invalid: multiwriter with eventual consistency
-/// means writers operate on stale data. Valid combinations:
+/// Valid combinations:
 /// - Dedicated + Replicated (journal shipping, RPO = sync_interval)
 /// - Dedicated + Synchronous (S3Primary, RPO = 0)
+/// - Dedicated + Eventual (S3Primary base + journal deltas)
 /// - Shared + Synchronous (lease-per-write, RPO = 0)
+///
+/// Invalid:
+/// - Shared + Replicated: multiwriter + eventual = writes on stale data
+/// - Shared + Eventual: same problem (journal deltas don't serialize)
 pub fn validate_mode_durability(mode: HaMode, durability: Durability) -> Result<(), String> {
     match (mode, durability) {
-        (HaMode::Dedicated, Durability::Replicated) => Ok(()),
-        (HaMode::Dedicated, Durability::Synchronous) => Ok(()),
+        (HaMode::Dedicated, _) => Ok(()),
         (HaMode::Shared, Durability::Synchronous) => Ok(()),
         (HaMode::Shared, Durability::Replicated) => {
             Err("Shared mode requires Synchronous durability (Shared+Replicated is invalid: multiwriter + eventual = writes on stale data)".to_string())
+        }
+        (HaMode::Shared, Durability::Eventual) => {
+            Err("Shared mode requires Synchronous durability (Shared+Eventual is invalid: journal deltas don't serialize across writers)".to_string())
         }
     }
 }
