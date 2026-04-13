@@ -8,6 +8,68 @@ pub enum Role {
     Follower,
 }
 
+/// HA topology mode: how writes are coordinated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HaMode {
+    /// Single persistent leader, followers replay.
+    Dedicated,
+    /// Multiple writers, lease-serialized per write.
+    Shared,
+}
+
+/// How data is made durable between writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Replication log shipping (walrust WAL / graphstream journal). RPO = sync_interval.
+    Replicated,
+    /// Page-level S3 tiering (turbolite / turbograph S3Primary). RPO = 0.
+    Synchronous,
+}
+
+impl Default for HaMode {
+    fn default() -> Self { HaMode::Dedicated }
+}
+
+impl Default for Durability {
+    fn default() -> Self { Durability::Replicated }
+}
+
+impl std::fmt::Display for HaMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HaMode::Dedicated => write!(f, "Dedicated"),
+            HaMode::Shared => write!(f, "Shared"),
+        }
+    }
+}
+
+impl std::fmt::Display for Durability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Durability::Replicated => write!(f, "Replicated"),
+            Durability::Synchronous => write!(f, "Synchronous"),
+        }
+    }
+}
+
+/// Validate a mode + durability combination.
+///
+/// Shared + Replicated is invalid: multiwriter with eventual consistency
+/// means writers operate on stale data. Valid combinations:
+/// - Dedicated + Replicated (journal shipping, RPO = sync_interval)
+/// - Dedicated + Synchronous (S3Primary, RPO = 0)
+/// - Shared + Synchronous (lease-per-write, RPO = 0)
+pub fn validate_mode_durability(mode: HaMode, durability: Durability) -> Result<(), String> {
+    match (mode, durability) {
+        (HaMode::Dedicated, Durability::Replicated) => Ok(()),
+        (HaMode::Dedicated, Durability::Synchronous) => Ok(()),
+        (HaMode::Shared, Durability::Synchronous) => Ok(()),
+        (HaMode::Shared, Durability::Replicated) => {
+            Err("Shared mode requires Synchronous durability (Shared+Replicated is invalid: multiwriter + eventual = writes on stale data)".to_string())
+        }
+    }
+}
+
 impl Role {
     /// Convert Role to u8 for atomic storage.
     pub fn to_u8(self) -> u8 {

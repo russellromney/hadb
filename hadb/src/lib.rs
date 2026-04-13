@@ -42,7 +42,7 @@ pub use manifest::{
     BTreeManifestEntry, FrameEntry, HaManifest, InMemoryManifestStore, ManifestMeta,
     StorageManifest, SubframeOverride,
 };
-pub use types::{CoordinatorConfig, LeaseConfig, Role, RoleEvent};
+pub use types::{CoordinatorConfig, Durability, HaMode, LeaseConfig, Role, RoleEvent, validate_mode_durability};
 pub use metrics::{HaMetrics, MetricsSnapshot};
 pub use lease::{DbLease, InMemoryLeaseStore, LeaseData};
 pub use node_registry::{node_key, nodes_prefix, InMemoryNodeRegistry, NodeRegistry, NodeRegistration};

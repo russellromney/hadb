@@ -287,6 +287,7 @@ mod tests {
                 frame_tables: vec![vec![FrameEntry {
                     offset: 0,
                     len: 4096,
+                    page_count: 0,
                 }]],
                 group_pages: vec![vec![1, 2, 3]],
                 btrees: BTreeMap::from([(
@@ -608,6 +609,7 @@ mod tests {
             entry: FrameEntry {
                 offset: 8192,
                 len: 4096,
+                page_count: 0,
             },
         };
         let bytes = rmp_serde::to_vec(&ovr).expect("serialize");
@@ -877,6 +879,7 @@ mod tests {
                     &vec![vec![FrameEntry {
                         offset: 0,
                         len: 4096,
+                        page_count: 0,
                     }]]
                 );
                 assert_eq!(group_pages, &vec![vec![1u64, 2, 3]]);
