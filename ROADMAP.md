@@ -1,5 +1,40 @@
 # hadb Roadmap
 
+## Phase Decouple: Opaque StorageManifest
+
+> Before: Phase Anvil
+
+`StorageManifest` is currently an enum with variants for each database backend (Turbolite, TurboliteWalrust, Walrust, Turbograph, TurbographGraphstream). This means hadb knows about its implementations; every new backend requires changing hadb's core types.
+
+**Fix:** Make the storage payload opaque. hadb owns coordination (version, writer_id, lease_epoch, CAS). The storage manifest is a tagged blob that hadb passes through without interpreting.
+
+```rust
+pub struct HaManifest {
+    pub version: u64,
+    pub writer_id: String,
+    pub lease_epoch: u64,
+    pub timestamp_ms: u64,
+    pub storage_type: String,   // "turbolite", "turbograph", etc.
+    pub storage: Vec<u8>,       // opaque, impl-owned serialized bytes
+}
+```
+
+Each implementation (haqlite, hakuzu, haduck) deserializes the `storage` bytes into its own manifest type. hadb never parses it.
+
+### Changes
+- [ ] Replace `StorageManifest` enum with `storage_type: String` + `storage: Vec<u8>` on `HaManifest`
+- [ ] Update `ManifestMeta` (no storage payload, just coordination fields; already correct)
+- [ ] Update all ManifestStore implementations (S3, NATS, etcd, Redis) to pass through opaque bytes
+- [ ] Update haqlite: serialize/deserialize its own manifest types from the opaque bytes
+- [ ] Update hakuzu: same
+- [ ] Remove `StorageManifest` enum and all variant-specific types from hadb (FrameEntry, SubframeOverride, BTreeManifestEntry move to turbolite/turbograph)
+- [ ] Tests: round-trip opaque bytes through all ManifestStore backends
+
+### Why not generic type parameter
+`HaManifest<S>` would make ManifestStore generic, which ripples through Coordinator. More type gymnastics than it's worth. Opaque bytes with a string discriminator is simpler and hadb never needs to interpret the payload.
+
+---
+
 ## Phase 1: hadb-io — Shared S3/Retry/Upload Infrastructure
 
 ### Problem

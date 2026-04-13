@@ -109,6 +109,42 @@ pub enum StorageManifest {
         snapshot_key: Option<String>,
         snapshot_txid: Option<u64>,
     },
+    /// Turbograph page-group manifest (analogous to Turbolite but for graph databases).
+    Turbograph {
+        /// turbograph manifest version (for S3 key uniqueness: pg/{gid}_v{version})
+        #[serde(default)]
+        turbograph_version: u64,
+        page_count: u64,
+        page_size: u32,
+        pages_per_group: u32,
+        sub_pages_per_frame: u32,
+        page_group_keys: Vec<String>,
+        frame_tables: Vec<Vec<FrameEntry>>,
+        subframe_overrides: Vec<BTreeMap<usize, SubframeOverride>>,
+        encrypted: bool,
+        /// Graphstream journal sequence captured at checkpoint.
+        /// Followers replay journal entries after this sequence.
+        #[serde(default)]
+        journal_seq: u64,
+    },
+    /// Hybrid: turbograph page groups as base state + graphstream journal deltas.
+    TurbographGraphstream {
+        #[serde(default)]
+        turbograph_version: u64,
+        page_count: u64,
+        page_size: u32,
+        pages_per_group: u32,
+        sub_pages_per_frame: u32,
+        page_group_keys: Vec<String>,
+        frame_tables: Vec<Vec<FrameEntry>>,
+        subframe_overrides: Vec<BTreeMap<usize, SubframeOverride>>,
+        encrypted: bool,
+        #[serde(default)]
+        journal_seq: u64,
+        /// S3 prefix for graphstream delta segments.
+        #[serde(default)]
+        graphstream_segment_prefix: String,
+    },
 }
 
 /// A single frame entry in a turbolite frame table.
@@ -879,6 +915,340 @@ mod tests {
             }
             _ => panic!("expected Walrust"),
         }
+    }
+
+    // ========================================================================
+    // Turbograph variant tests
+    // ========================================================================
+
+    fn make_turbograph_manifest(writer: &str, epoch: u64) -> HaManifest {
+        HaManifest {
+            version: 0,
+            writer_id: writer.to_string(),
+            lease_epoch: epoch,
+            timestamp_ms: 3000,
+            storage: StorageManifest::Turbograph {
+                turbograph_version: 5,
+                page_count: 200,
+                page_size: 4096,
+                pages_per_group: 4096,
+                sub_pages_per_frame: 4,
+                page_group_keys: vec!["pg/0_v5".to_string(), "pg/1_v5".to_string()],
+                frame_tables: vec![vec![FrameEntry { offset: 0, len: 8192 }]],
+                subframe_overrides: vec![BTreeMap::new()],
+                encrypted: false,
+                journal_seq: 42,
+            },
+        }
+    }
+
+    fn make_turbograph_graphstream_manifest(writer: &str, epoch: u64) -> HaManifest {
+        HaManifest {
+            version: 0,
+            writer_id: writer.to_string(),
+            lease_epoch: epoch,
+            timestamp_ms: 4000,
+            storage: StorageManifest::TurbographGraphstream {
+                turbograph_version: 7,
+                page_count: 500,
+                page_size: 4096,
+                pages_per_group: 4096,
+                sub_pages_per_frame: 4,
+                page_group_keys: vec!["pg/0_v7".to_string()],
+                frame_tables: vec![vec![FrameEntry { offset: 0, len: 16384 }]],
+                subframe_overrides: vec![BTreeMap::from([(
+                    0,
+                    SubframeOverride {
+                        key: "pg/0_f0_v7".to_string(),
+                        entry: FrameEntry { offset: 0, len: 4096 },
+                    },
+                )])],
+                encrypted: true,
+                journal_seq: 100,
+                graphstream_segment_prefix: "gs/db1/".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn turbograph_serde_roundtrip_json() {
+        let m = make_turbograph_manifest("node-graph", 10);
+        let json = serde_json::to_string(&m).expect("json serialize");
+        let decoded: HaManifest = serde_json::from_str(&json).expect("json deserialize");
+        assert_eq!(m, decoded);
+    }
+
+    #[tokio::test]
+    async fn turbograph_serde_roundtrip_msgpack() {
+        let m = make_turbograph_manifest("node-graph", 10);
+        let bytes = rmp_serde::to_vec(&m).expect("msgpack serialize");
+        let decoded: HaManifest = rmp_serde::from_slice(&bytes).expect("msgpack deserialize");
+        assert_eq!(m, decoded);
+    }
+
+    #[tokio::test]
+    async fn turbograph_graphstream_serde_roundtrip_json() {
+        let m = make_turbograph_graphstream_manifest("node-gs", 20);
+        let json = serde_json::to_string(&m).expect("json serialize");
+        let decoded: HaManifest = serde_json::from_str(&json).expect("json deserialize");
+        assert_eq!(m, decoded);
+    }
+
+    #[tokio::test]
+    async fn turbograph_graphstream_serde_roundtrip_msgpack() {
+        let m = make_turbograph_graphstream_manifest("node-gs", 20);
+        let bytes = rmp_serde::to_vec(&m).expect("msgpack serialize");
+        let decoded: HaManifest = rmp_serde::from_slice(&bytes).expect("msgpack deserialize");
+        assert_eq!(m, decoded);
+    }
+
+    #[tokio::test]
+    async fn turbograph_store_roundtrip() {
+        let store = InMemoryManifestStore::new();
+        let m = make_turbograph_manifest("node-graph", 5);
+        let res = store.put("graph1", &m, None).await.unwrap();
+        assert!(res.success);
+
+        let fetched = store.get("graph1").await.unwrap().expect("should exist");
+        assert_eq!(fetched.version, 1);
+        assert_eq!(fetched.writer_id, "node-graph");
+        match &fetched.storage {
+            StorageManifest::Turbograph {
+                turbograph_version,
+                page_count,
+                page_size,
+                pages_per_group,
+                sub_pages_per_frame,
+                page_group_keys,
+                frame_tables,
+                subframe_overrides,
+                journal_seq,
+                encrypted,
+            } => {
+                assert_eq!(*turbograph_version, 5);
+                assert_eq!(*page_count, 200);
+                assert_eq!(*page_size, 4096);
+                assert_eq!(*pages_per_group, 4096);
+                assert_eq!(*sub_pages_per_frame, 4);
+                assert_eq!(*journal_seq, 42);
+                assert!(!encrypted);
+                assert_eq!(
+                    page_group_keys,
+                    &vec!["pg/0_v5".to_string(), "pg/1_v5".to_string()]
+                );
+                assert_eq!(
+                    frame_tables,
+                    &vec![vec![FrameEntry { offset: 0, len: 8192 }]]
+                );
+                assert_eq!(subframe_overrides, &vec![BTreeMap::new()]);
+            }
+            _ => panic!("expected Turbograph variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn turbograph_graphstream_store_roundtrip() {
+        let store = InMemoryManifestStore::new();
+        let m = make_turbograph_graphstream_manifest("node-gs", 15);
+        let res = store.put("graph2", &m, None).await.unwrap();
+        assert!(res.success);
+
+        let fetched = store.get("graph2").await.unwrap().expect("should exist");
+        match &fetched.storage {
+            StorageManifest::TurbographGraphstream {
+                turbograph_version,
+                page_count,
+                page_size,
+                pages_per_group,
+                sub_pages_per_frame,
+                page_group_keys,
+                frame_tables,
+                subframe_overrides,
+                journal_seq,
+                graphstream_segment_prefix,
+                encrypted,
+            } => {
+                assert_eq!(*turbograph_version, 7);
+                assert_eq!(*page_count, 500);
+                assert_eq!(*page_size, 4096);
+                assert_eq!(*pages_per_group, 4096);
+                assert_eq!(*sub_pages_per_frame, 4);
+                assert_eq!(*journal_seq, 100);
+                assert_eq!(graphstream_segment_prefix, "gs/db1/");
+                assert!(*encrypted);
+                assert_eq!(
+                    page_group_keys,
+                    &vec!["pg/0_v7".to_string()]
+                );
+                assert_eq!(
+                    frame_tables,
+                    &vec![vec![FrameEntry { offset: 0, len: 16384 }]]
+                );
+                assert_eq!(subframe_overrides.len(), 1);
+                let ovr = subframe_overrides[0].get(&0).expect("subframe 0 override");
+                assert_eq!(ovr.key, "pg/0_f0_v7");
+                assert_eq!(ovr.entry, FrameEntry { offset: 0, len: 4096 });
+            }
+            _ => panic!("expected TurbographGraphstream variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn turbograph_journal_seq_defaults_to_zero() {
+        // Simulate old manifest without journal_seq field
+        let json = r#"{
+            "version": 1,
+            "writer_id": "old-node",
+            "lease_epoch": 1,
+            "timestamp_ms": 1000,
+            "storage": {
+                "Turbograph": {
+                    "turbograph_version": 1,
+                    "page_count": 10,
+                    "page_size": 4096,
+                    "pages_per_group": 4096,
+                    "sub_pages_per_frame": 4,
+                    "page_group_keys": [],
+                    "frame_tables": [],
+                    "subframe_overrides": [],
+                    "encrypted": false
+                }
+            }
+        }"#;
+        let decoded: HaManifest = serde_json::from_str(json).expect("deserialize");
+        match &decoded.storage {
+            StorageManifest::Turbograph { journal_seq, .. } => {
+                assert_eq!(*journal_seq, 0, "journal_seq should default to 0");
+            }
+            _ => panic!("expected Turbograph"),
+        }
+    }
+
+    #[tokio::test]
+    async fn turbograph_graphstream_journal_seq_defaults_to_zero() {
+        // Simulate old manifest without journal_seq field
+        let json = r#"{
+            "version": 1,
+            "writer_id": "old-node",
+            "lease_epoch": 1,
+            "timestamp_ms": 1000,
+            "storage": {
+                "TurbographGraphstream": {
+                    "turbograph_version": 1,
+                    "page_count": 10,
+                    "page_size": 4096,
+                    "pages_per_group": 4096,
+                    "sub_pages_per_frame": 4,
+                    "page_group_keys": [],
+                    "frame_tables": [],
+                    "subframe_overrides": [],
+                    "encrypted": false,
+                    "graphstream_segment_prefix": "gs/old/"
+                }
+            }
+        }"#;
+        let decoded: HaManifest = serde_json::from_str(json).expect("deserialize");
+        match &decoded.storage {
+            StorageManifest::TurbographGraphstream { journal_seq, .. } => {
+                assert_eq!(*journal_seq, 0, "journal_seq should default to 0");
+            }
+            _ => panic!("expected TurbographGraphstream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn turbograph_graphstream_segment_prefix_defaults_to_empty() {
+        // Simulate old manifest without graphstream_segment_prefix field
+        let json = r#"{
+            "version": 1,
+            "writer_id": "old-node",
+            "lease_epoch": 1,
+            "timestamp_ms": 1000,
+            "storage": {
+                "TurbographGraphstream": {
+                    "turbograph_version": 1,
+                    "page_count": 10,
+                    "page_size": 4096,
+                    "pages_per_group": 4096,
+                    "sub_pages_per_frame": 4,
+                    "page_group_keys": [],
+                    "frame_tables": [],
+                    "subframe_overrides": [],
+                    "encrypted": false,
+                    "journal_seq": 5
+                }
+            }
+        }"#;
+        let decoded: HaManifest = serde_json::from_str(json).expect("deserialize");
+        match &decoded.storage {
+            StorageManifest::TurbographGraphstream {
+                graphstream_segment_prefix,
+                journal_seq,
+                ..
+            } => {
+                assert_eq!(
+                    graphstream_segment_prefix, "",
+                    "graphstream_segment_prefix should default to empty string"
+                );
+                assert_eq!(*journal_seq, 5);
+            }
+            _ => panic!("expected TurbographGraphstream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn turbograph_graphstream_with_empty_fields() {
+        let m = HaManifest {
+            version: 0,
+            writer_id: "node-1".to_string(),
+            lease_epoch: 1,
+            timestamp_ms: 1000,
+            storage: StorageManifest::TurbographGraphstream {
+                turbograph_version: 0,
+                page_count: 0,
+                page_size: 0,
+                pages_per_group: 0,
+                sub_pages_per_frame: 0,
+                page_group_keys: vec![],
+                frame_tables: vec![],
+                subframe_overrides: vec![],
+                encrypted: false,
+                journal_seq: 0,
+                graphstream_segment_prefix: String::new(),
+            },
+        };
+        let bytes = rmp_serde::to_vec(&m).expect("serialize");
+        let decoded: HaManifest = rmp_serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(m, decoded);
+
+        let json = serde_json::to_string(&m).expect("json serialize");
+        let decoded_json: HaManifest = serde_json::from_str(&json).expect("json deserialize");
+        assert_eq!(m, decoded_json);
+    }
+
+    #[tokio::test]
+    async fn turbograph_with_empty_fields() {
+        let m = HaManifest {
+            version: 0,
+            writer_id: "node-1".to_string(),
+            lease_epoch: 1,
+            timestamp_ms: 1000,
+            storage: StorageManifest::Turbograph {
+                turbograph_version: 0,
+                page_count: 0,
+                page_size: 0,
+                pages_per_group: 0,
+                sub_pages_per_frame: 0,
+                page_group_keys: vec![],
+                frame_tables: vec![],
+                subframe_overrides: vec![],
+                encrypted: false,
+                journal_seq: 0,
+            },
+        };
+        let bytes = rmp_serde::to_vec(&m).expect("serialize");
+        let decoded: HaManifest = rmp_serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(m, decoded);
     }
 
     #[tokio::test]
