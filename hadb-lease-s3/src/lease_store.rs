@@ -17,22 +17,39 @@ use crate::error::{is_not_found, is_precondition_failed};
 pub struct S3LeaseStore {
     client: aws_sdk_s3::Client,
     bucket: String,
+    prefix: String,
 }
 
 impl S3LeaseStore {
     pub fn new(client: aws_sdk_s3::Client, bucket: String) -> Self {
-        Self { client, bucket }
+        Self { client, bucket, prefix: String::new() }
+    }
+
+    /// Set a key prefix. All lease operations will prepend this to the key,
+    /// scoping leases to a namespace within the bucket.
+    pub fn with_prefix(mut self, prefix: &str) -> Self {
+        self.prefix = prefix.to_string();
+        self
+    }
+
+    fn prefixed_key(&self, key: &str) -> String {
+        if self.prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{}{}", self.prefix, key)
+        }
     }
 }
 
 #[async_trait]
 impl LeaseStore for S3LeaseStore {
     async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
+        let full_key = self.prefixed_key(key);
         let result = self
             .client
             .get_object()
             .bucket(&self.bucket)
-            .key(key)
+            .key(&full_key)
             .send()
             .await;
 
@@ -56,11 +73,12 @@ impl LeaseStore for S3LeaseStore {
     }
 
     async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult> {
+        let full_key = self.prefixed_key(key);
         let result = self
             .client
             .put_object()
             .bucket(&self.bucket)
-            .key(key)
+            .key(&full_key)
             .body(data.into())
             .if_none_match("*")
             .send()
@@ -80,11 +98,12 @@ impl LeaseStore for S3LeaseStore {
     }
 
     async fn write_if_match(&self, key: &str, data: Vec<u8>, etag: &str) -> Result<CasResult> {
+        let full_key = self.prefixed_key(key);
         let result = self
             .client
             .put_object()
             .bucket(&self.bucket)
-            .key(key)
+            .key(&full_key)
             .body(data.into())
             .if_match(etag)
             .send()
@@ -104,10 +123,11 @@ impl LeaseStore for S3LeaseStore {
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
+        let full_key = self.prefixed_key(key);
         self.client
             .delete_object()
             .bucket(&self.bucket)
-            .key(key)
+            .key(&full_key)
             .send()
             .await
             .map_err(|e| anyhow!("S3 DeleteObject failed: {}", e))?;
