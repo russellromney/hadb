@@ -9,6 +9,10 @@ use std::path::Path;
 
 use crate::manifest::{HaManifest, ManifestMeta};
 
+// `LeaseStore` and `CasResult` live in `hadb-lease`. Re-exported here so
+// existing callers that did `use hadb::{LeaseStore, CasResult}` keep working.
+pub use hadb_lease::{CasResult, LeaseStore};
+
 // ============================================================================
 // Replicator: Sync layer abstraction
 // ============================================================================
@@ -83,59 +87,6 @@ pub trait Executor: Send + Sync {
     /// Used by coordinator to decide whether to forward to leader.
     /// Should return true for INSERT/UPDATE/DELETE/CREATE, false for SELECT/MATCH.
     fn is_mutation(&self, query: &str) -> bool;
-}
-
-// ============================================================================
-// LeaseStore: Leader election abstraction
-// ============================================================================
-
-/// Result of a CAS (compare-and-swap) write operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CasResult {
-    /// true if the write succeeded, false if precondition failed.
-    pub success: bool,
-    /// New etag if the write succeeded (opaque version token).
-    pub etag: Option<String>,
-}
-
-/// Trait for CAS lease operations on a key-value store.
-///
-/// Used for leader election via conditional writes. Any storage system
-/// with CAS support can implement this: S3 (conditional PUT), etcd (CAS),
-/// Consul (check-and-set), Redis (SETNX), DynamoDB (conditional writes).
-///
-/// The coordinator uses this for:
-/// - Leader claims lease via `write_if_not_exists`
-/// - Leader renews lease via `write_if_match`
-/// - Followers read lease to discover leader via `read`
-/// - Leader releases lease via `delete` on graceful shutdown
-#[async_trait]
-pub trait LeaseStore: Send + Sync {
-    /// Read a key, returning (data, etag). None if key doesn't exist.
-    ///
-    /// The etag is an opaque version token used for CAS operations.
-    /// For S3: the ETag header. For etcd: the revision number.
-    async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>>;
-
-    /// Write only if key doesn't exist (create). CAS.
-    ///
-    /// Used by followers to claim an expired lease. Returns success=true
-    /// if the write succeeded (lease was claimed), false if another node
-    /// already claimed it (CAS conflict).
-    async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult>;
-
-    /// Write only if current etag matches (update). CAS.
-    ///
-    /// Used by leader to renew its lease. Returns success=true if the
-    /// renewal succeeded (still leader), false if another node claimed
-    /// the lease (CAS conflict - self-fencing).
-    async fn write_if_match(&self, key: &str, data: Vec<u8>, etag: &str) -> Result<CasResult>;
-
-    /// Delete a key (best-effort for lease release).
-    ///
-    /// Used by leader on graceful shutdown to release the lease immediately
-    /// instead of waiting for TTL expiration. Failures are logged but not fatal.
-    async fn delete(&self, key: &str) -> Result<()>;
 }
 
 // ============================================================================
@@ -263,24 +214,6 @@ mod tests {
         }
     }
 
-    struct MockLeaseStore;
-
-    #[async_trait]
-    impl LeaseStore for MockLeaseStore {
-        async fn read(&self, _key: &str) -> Result<Option<(Vec<u8>, String)>> {
-            Ok(None)
-        }
-        async fn write_if_not_exists(&self, _key: &str, _data: Vec<u8>) -> Result<CasResult> {
-            Ok(CasResult { success: true, etag: Some("etag1".into()) })
-        }
-        async fn write_if_match(&self, _key: &str, _data: Vec<u8>, _etag: &str) -> Result<CasResult> {
-            Ok(CasResult { success: true, etag: Some("etag2".into()) })
-        }
-        async fn delete(&self, _key: &str) -> Result<()> {
-            Ok(())
-        }
-    }
-
     struct MockStorageBackend;
 
     #[async_trait]
@@ -304,18 +237,7 @@ mod tests {
         // Ensure all traits compile and mock implementations work
         let _replicator = MockReplicator;
         let _executor = MockExecutor;
-        let _lease_store = MockLeaseStore;
         let _storage = MockStorageBackend;
-    }
-
-    #[test]
-    fn test_cas_result_equality() {
-        let r1 = CasResult { success: true, etag: Some("v1".into()) };
-        let r2 = CasResult { success: true, etag: Some("v1".into()) };
-        let r3 = CasResult { success: false, etag: None };
-
-        assert_eq!(r1, r2);
-        assert_ne!(r1, r3);
     }
 
     #[test]
@@ -385,76 +307,6 @@ mod tests {
         }
     }
 
-    /// MockLeaseStore that tracks operations and can simulate CAS conflicts
-    struct StatefulLeaseStore {
-        data: Arc<Mutex<std::collections::HashMap<String, (Vec<u8>, String)>>>,
-    }
-
-    impl StatefulLeaseStore {
-        fn new() -> Self {
-            Self {
-                data: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LeaseStore for StatefulLeaseStore {
-        async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
-            Ok(self.data.lock().await.get(key).cloned())
-        }
-
-        async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult> {
-            let mut store = self.data.lock().await;
-            if store.contains_key(key) {
-                // CAS conflict - key already exists
-                Ok(CasResult {
-                    success: false,
-                    etag: None,
-                })
-            } else {
-                let etag = format!("etag-{}", uuid::Uuid::new_v4());
-                store.insert(key.to_string(), (data, etag.clone()));
-                Ok(CasResult {
-                    success: true,
-                    etag: Some(etag),
-                })
-            }
-        }
-
-        async fn write_if_match(&self, key: &str, data: Vec<u8>, etag: &str) -> Result<CasResult> {
-            let mut store = self.data.lock().await;
-            if let Some((_, current_etag)) = store.get(key) {
-                if current_etag == etag {
-                    // Etag matches - update
-                    let new_etag = format!("etag-{}", uuid::Uuid::new_v4());
-                    store.insert(key.to_string(), (data, new_etag.clone()));
-                    Ok(CasResult {
-                        success: true,
-                        etag: Some(new_etag),
-                    })
-                } else {
-                    // CAS conflict - etag mismatch
-                    Ok(CasResult {
-                        success: false,
-                        etag: None,
-                    })
-                }
-            } else {
-                // Key doesn't exist - CAS conflict
-                Ok(CasResult {
-                    success: false,
-                    etag: None,
-                })
-            }
-        }
-
-        async fn delete(&self, key: &str) -> Result<()> {
-            self.data.lock().await.remove(key);
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn test_replicator_add_success() {
         let replicator = MockReplicator;
@@ -477,97 +329,6 @@ mod tests {
         assert!(replicator.pull("testdb", Path::new("/tmp/test.db")).await.is_err());
         assert!(replicator.remove("testdb").await.is_err());
         assert!(replicator.sync("testdb").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_lease_store_cas_create() {
-        let store = StatefulLeaseStore::new();
-
-        // First write should succeed (key doesn't exist)
-        let result = store
-            .write_if_not_exists("lease1", b"node1".to_vec())
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(result.etag.is_some());
-
-        // Second write should fail (key exists)
-        let result = store
-            .write_if_not_exists("lease1", b"node2".to_vec())
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(result.etag.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_lease_store_cas_update() {
-        let store = StatefulLeaseStore::new();
-
-        // Create initial lease
-        let result = store
-            .write_if_not_exists("lease1", b"node1-v1".to_vec())
-            .await
-            .unwrap();
-        assert!(result.success);
-        let etag = result.etag.unwrap();
-
-        // Update with correct etag should succeed
-        let result = store
-            .write_if_match("lease1", b"node1-v2".to_vec(), &etag)
-            .await
-            .unwrap();
-        assert!(result.success);
-        let new_etag = result.etag.unwrap();
-        assert_ne!(etag, new_etag);
-
-        // Update with old etag should fail
-        let result = store
-            .write_if_match("lease1", b"node1-v3".to_vec(), &etag)
-            .await
-            .unwrap();
-        assert!(!result.success);
-    }
-
-    #[tokio::test]
-    async fn test_lease_store_read() {
-        let store = StatefulLeaseStore::new();
-
-        // Read non-existent key
-        let result = store.read("lease1").await.unwrap();
-        assert!(result.is_none());
-
-        // Create a lease
-        let write_result = store
-            .write_if_not_exists("lease1", b"node1".to_vec())
-            .await
-            .unwrap();
-        let etag = write_result.etag.unwrap();
-
-        // Read existing key
-        let result = store.read("lease1").await.unwrap();
-        assert!(result.is_some());
-        let (data, read_etag) = result.unwrap();
-        assert_eq!(data, b"node1");
-        assert_eq!(read_etag, etag);
-    }
-
-    #[tokio::test]
-    async fn test_lease_store_delete() {
-        let store = StatefulLeaseStore::new();
-
-        // Create and delete
-        store
-            .write_if_not_exists("lease1", b"node1".to_vec())
-            .await
-            .unwrap();
-        assert!(store.read("lease1").await.unwrap().is_some());
-
-        store.delete("lease1").await.unwrap();
-        assert!(store.read("lease1").await.unwrap().is_none());
-
-        // Delete non-existent key (should be idempotent)
-        assert!(store.delete("lease1").await.is_ok());
     }
 
     #[tokio::test]
@@ -595,38 +356,5 @@ mod tests {
         // Execute query
         let result = executor.execute("SELECT * FROM users", ()).await;
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_cas_result_edge_cases() {
-        // Both None
-        let r1 = CasResult {
-            success: false,
-            etag: None,
-        };
-        let r2 = CasResult {
-            success: false,
-            etag: None,
-        };
-        assert_eq!(r1, r2);
-
-        // Empty string etag
-        let r3 = CasResult {
-            success: true,
-            etag: Some("".to_string()),
-        };
-        let r4 = CasResult {
-            success: true,
-            etag: Some("".to_string()),
-        };
-        assert_eq!(r3, r4);
-
-        // Success=true with None etag (edge case, shouldn't happen but test it)
-        let r5 = CasResult {
-            success: true,
-            etag: None,
-        };
-        assert!(r5.success);
-        assert!(r5.etag.is_none());
     }
 }

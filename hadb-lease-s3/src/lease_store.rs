@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use hadb::{CasResult, LeaseStore};
+use hadb_lease::{CasResult, LeaseStore};
 
 use crate::error::{is_not_found, is_precondition_failed};
 

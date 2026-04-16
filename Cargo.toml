@@ -2,6 +2,7 @@
 members = [
     "hadb",
     "hadb-storage",
+    "hadb-lease",
     "hadb-io",
     "hadb-lease-s3",
     "hadb-lease-nats",

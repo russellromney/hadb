@@ -37,7 +37,8 @@ pub mod traits;
 pub mod types;
 
 // Re-export core traits
-pub use traits::{CasResult, LeaseStore, ManifestStore, Replicator, StorageBackend};
+pub use hadb_lease::{CasResult, LeaseStore};
+pub use traits::{ManifestStore, Replicator, StorageBackend};
 pub use manifest::{
     BTreeManifestEntry, FrameEntry, HaManifest, InMemoryManifestStore, ManifestMeta,
     StorageManifest, SubframeOverride,

@@ -10,8 +10,9 @@ keywords = ["ha", "s3", "leader-election", "lease"]
 categories = ["database", "network-programming"]
 
 [dependencies]
-# Core hadb dependency
+# Core hadb dependencies
 hadb = { path = "../hadb", version = "0.4.0" }
+hadb-lease = { path = "../hadb-lease", version = "0.4.0" }
 
 # Async runtime
 tokio = { workspace = true }

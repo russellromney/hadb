@@ -1,0 +1,19 @@
+[package]
+name = "hadb-lease"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LeaseStore trait for hadb HA coordination. Trait-only; impls live in sibling crates (hadb-lease-s3, hadb-lease-nats, hadb-lease-etcd, hadb-lease-cinch)."
+keywords = ["ha", "lease", "leader-election", "coordination"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+uuid = { workspace = true }

@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use async_nats::jetstream::kv;
 use async_trait::async_trait;
 use bytes::Bytes;
-use hadb::{CasResult, LeaseStore};
+use hadb_lease::{CasResult, LeaseStore};
 
 /// LeaseStore backed by NATS JetStream Key-Value.
 ///

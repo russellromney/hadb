@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// version identifier. `success=false` means a precondition failed
 /// (key already exists for `put_if_absent`, or etag mismatch for
 /// `put_if_match`); the caller must re-read and retry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CasResult {
     pub success: bool,
     pub etag: Option<String>,

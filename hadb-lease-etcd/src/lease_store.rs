@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use etcd_client::{Client, Compare, CompareOp, Txn, TxnOp};
-use hadb::{CasResult, LeaseStore};
+use hadb_lease::{CasResult, LeaseStore};
 
 /// LeaseStore backed by etcd KV with transactional CAS.
 ///
