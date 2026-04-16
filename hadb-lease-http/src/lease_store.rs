@@ -34,22 +34,19 @@ struct LeaseWriteResponse {
 
 /// LeaseStore backed by an HTTP endpoint.
 ///
-/// Designed for embedded haqlite replicas that coordinate through a
-/// proxy server. The proxy handles NATS/S3/etcd operations and
-/// multi-tenant scoping.
+/// Authenticates with a Bearer token. The server owns any database/tenant
+/// scoping: the token identifies the scope, the `key` identifies the
+/// lease within it (e.g., `"writer"`).
 pub struct HttpLeaseStore {
     client: reqwest::Client,
     endpoint: String,
     token: String,
-    /// Optional database_id for admin-key auth. When set, included as query param
-    /// so the server knows which database the lease is for (instead of deriving
-    /// it from the token).
-    database_id: Option<String>,
 }
 
 impl HttpLeaseStore {
-    /// Create a new HTTP lease store with a per-database token.
-    /// The server derives database_id from the token.
+    /// Create a new HTTP lease store. `token` is sent as a Bearer token on
+    /// every request; the server scopes leases by whatever that token
+    /// identifies.
     pub fn new(endpoint: &str, token: &str) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -59,23 +56,6 @@ impl HttpLeaseStore {
             client,
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
-            database_id: None,
-        }
-    }
-
-    /// Create with admin key + explicit database_id.
-    /// Used by hosted engines that authenticate with an admin key
-    /// instead of per-database tokens.
-    pub fn new_admin(endpoint: &str, admin_key: &str, database_id: &str) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .expect("failed to build HTTP client");
-        Self {
-            client,
-            endpoint: endpoint.trim_end_matches('/').to_string(),
-            token: admin_key.to_string(),
-            database_id: Some(database_id.to_string()),
         }
     }
 
@@ -85,24 +65,15 @@ impl HttpLeaseStore {
             client,
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
-            database_id: None,
         }
     }
 
     fn lease_url(&self, key: &str) -> String {
-        match &self.database_id {
-            Some(db_id) => format!(
-                "{}/v1/lease?key={}&database_id={}",
-                self.endpoint,
-                urlencoding::encode(key),
-                urlencoding::encode(db_id),
-            ),
-            None => format!(
-                "{}/v1/lease?key={}",
-                self.endpoint,
-                urlencoding::encode(key)
-            ),
-        }
+        format!(
+            "{}/v1/lease?key={}",
+            self.endpoint,
+            urlencoding::encode(key)
+        )
     }
 }
 

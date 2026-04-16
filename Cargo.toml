@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "hadb",
+    "hadb-storage",
     "hadb-io",
     "hadb-lease-s3",
     "hadb-lease-nats",

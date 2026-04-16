@@ -24,6 +24,16 @@ use crate::manifest::ManifestStore;
 use crate::traits::{LeaseStore, Replicator};
 use crate::types::{CoordinatorConfig, Role, RoleEvent};
 
+/// Resolve the effective lease key for a database.
+/// If `override_key` is set, returns it unchanged. Otherwise builds the
+/// legacy compound key `"{prefix}{name}/_lease.json"` used by S3/NATS backends.
+fn resolve_lease_key(override_key: &Option<String>, prefix: &str, name: &str) -> String {
+    match override_key {
+        Some(k) => k.clone(),
+        None => format!("{}{}/_lease.json", prefix, name),
+    }
+}
+
 /// Atomic wrapper around Role for lock-free reads.
 pub(crate) struct AtomicRole(AtomicU8);
 
@@ -170,10 +180,10 @@ impl Coordinator {
             .as_ref()
             .expect("lease config must be present when lease_store is Some");
 
+        let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
         let mut lease = DbLease::new(
             lease_store,
-            &self.prefix,
-            name,
+            &lease_key,
             &lease_config.instance_id,
             &lease_config.address,
             lease_config.ttl_secs,
@@ -197,8 +207,7 @@ impl Coordinator {
         } else {
             match DbLease::new(
                 self.lease_store.as_ref().unwrap().clone(),
-                &self.prefix,
-                name,
+                &lease_key,
                 &lease_config.instance_id,
                 &lease_config.address,
                 lease_config.ttl_secs,
@@ -460,6 +469,36 @@ impl Coordinator {
         let _ = tokio::join!(follower_handle, monitor_handle);
     }
 
+    /// Simulate process-level crash for tests: abort all background tasks
+    /// for every joined database WITHOUT releasing leases or deregistering.
+    ///
+    /// A real process crash stops the leader's lease-renewal and follower-pull
+    /// loops in the middle of their work, so the lease expires on TTL and other
+    /// nodes detect it. `leave()` is the wrong tool for this kind of test
+    /// because it gracefully releases the lease — promotion then looks
+    /// deceptively fast. This method leaves the on-disk/S3 state exactly as
+    /// it would be after `kill -9`: the lease file still points at us, the
+    /// manifest is whatever was last flushed, and nothing local is cleaned up.
+    ///
+    /// After calling this, the coordinator's `databases` map is cleared so
+    /// further calls on this coordinator are no-ops; the coordinator itself
+    /// is effectively dead from a test's perspective. Use a fresh coordinator
+    /// on another node (with the same lease store) to observe failover.
+    ///
+    /// **Not** part of the production API — this intentionally violates the
+    /// graceful-shutdown invariants. Gated to `#[cfg(any(test, feature = "test-utils"))]`
+    /// would be nice but is impractical while multiple downstream repos
+    /// consume hadb without a shared feature flag. Treat as test-only.
+    pub async fn abort_tasks_for_test(&self) {
+        let mut dbs = self.databases.write().await;
+        let entries: Vec<(String, DbEntry)> = dbs.drain().collect();
+        drop(dbs);
+        for (name, entry) in entries {
+            entry.task_handle.abort();
+            tracing::warn!("Coordinator: ABORTED tasks for '{}' (test-only crash simulation)", name);
+        }
+    }
+
     /// Leave the HA cluster for a database.
     pub async fn leave(&self, name: &str) -> Result<()> {
         let entry = self.databases.write().await.remove(name);
@@ -489,10 +528,10 @@ impl Coordinator {
 
                 if let Some(ls) = &self.lease_store {
                     if let Some(lease_config) = &self.config.lease {
+                        let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
                         let lease = DbLease::new(
                             ls.clone(),
-                            &self.prefix,
-                            name,
+                            &lease_key,
                             &lease_config.instance_id,
                             &lease_config.address,
                             lease_config.ttl_secs,
@@ -609,10 +648,10 @@ impl Coordinator {
 
         let current_session_id = match &self.lease_store {
             Some(ls) => {
+                let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
                 let lease = DbLease::new(
                     ls.clone(),
-                    &self.prefix,
-                    name,
+                    &lease_key,
                     &lease_config.instance_id,
                     &lease_config.address,
                     lease_config.ttl_secs,
@@ -713,10 +752,10 @@ impl Coordinator {
 
         if let Some(ls) = &self.lease_store {
             if let Some(lease_config) = &self.config.lease {
+                let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
                 let lease = DbLease::new(
                     ls.clone(),
-                    &self.prefix,
-                    name,
+                    &lease_key,
                     &lease_config.instance_id,
                     &lease_config.address,
                     lease_config.ttl_secs,

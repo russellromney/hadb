@@ -246,10 +246,10 @@ async fn discover_leader(
     prefix: &str,
     db_name: &str,
 ) -> Result<String> {
+    let lease_key = format!("{}{}/_lease.json", prefix, db_name);
     let lease = DbLease::new(
         lease_store.clone(),
-        prefix,
-        db_name,
+        &lease_key,
         "client", // dummy instance_id — we never claim
         "client",
         5,

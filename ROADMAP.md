@@ -35,6 +35,20 @@ Each implementation (haqlite, hakuzu, haduck) deserializes the `storage` bytes i
 
 ---
 
+## Phase Forwarding: Write forwarding at hadb level
+
+> After: Phase Decouple
+
+Write forwarding (followers forward writes to the leader via HTTP) is currently implemented in haqlite with SQLite-specific execute/query handlers. This should be a generic hadb concern so any hadb-based database (haqlite, hakuzu) gets it for free.
+
+### Changes
+- [ ] Define a generic `WriteForwarder` trait in hadb with `execute(sql, params)` and `query(sql, params)` methods (or opaque `forward(request_bytes) -> response_bytes`)
+- [ ] Move forwarding server lifecycle (start on leader, stop on demotion) from haqlite to hadb Coordinator
+- [ ] Each implementation (haqlite, hakuzu) registers a handler that deserializes and executes
+- [ ] Port for forwarding server should be 0 (OS-assigned) per database, not a fixed default
+
+---
+
 ## Phase 1: hadb-io — Shared S3/Retry/Upload Infrastructure
 
 ### Problem

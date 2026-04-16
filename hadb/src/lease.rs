@@ -52,18 +52,21 @@ pub struct DbLease {
 }
 
 impl DbLease {
+    /// Create a new DbLease for a specific lease key.
+    ///
+    /// The caller owns the lease key format. S3/NATS backends typically use
+    /// compound keys like `"{prefix}{db_name}/_lease.json"`; HTTP/token-scoped
+    /// backends typically use a simple semantic name like `"writer"`.
     pub fn new(
         store: Arc<dyn LeaseStore>,
-        prefix: &str,
-        db_name: &str,
+        lease_key: &str,
         instance_id: &str,
         address: &str,
         ttl_secs: u64,
     ) -> Self {
-        let lease_key = format!("{}{}/_lease.json", prefix, db_name);
         Self {
             store,
-            lease_key,
+            lease_key: lease_key.to_string(),
             instance_id: instance_id.to_string(),
             address: address.to_string(),
             ttl_secs,
@@ -502,8 +505,7 @@ mod tests {
         let store = Arc::new(MockLeaseStore::new());
         let lease = DbLease::new(
             store,
-            "test-prefix/",
-            "mydb",
+            "test-prefix/mydb/_lease.json",
             "instance-1",
             "localhost:8080",
             60,
@@ -522,7 +524,7 @@ mod tests {
     #[tokio::test]
     async fn test_try_claim_no_lease_success() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60);
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60);
 
         let role = lease.try_claim().await.unwrap();
         assert_eq!(role, Role::Leader);
@@ -532,14 +534,14 @@ mod tests {
     #[tokio::test]
     async fn test_try_claim_sleeping_lease() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease1 = DbLease::new(store.clone(), "", "db1", "inst-1", "addr-1", 60);
+        let mut lease1 = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60);
 
         // First instance claims and sets sleeping
         lease1.try_claim().await.unwrap();
         lease1.set_sleeping().await.unwrap();
 
         // Second instance wakes it up
-        let mut lease2 = DbLease::new(store, "", "db1", "inst-2", "addr-2", 60);
+        let mut lease2 = DbLease::new(store, "db1/_lease.json", "inst-2", "addr-2", 60);
         let role = lease2.try_claim().await.unwrap();
         assert_eq!(role, Role::Leader);
         assert!(lease2.has_etag());
@@ -548,7 +550,7 @@ mod tests {
     #[tokio::test]
     async fn test_try_claim_already_held_by_us() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease = DbLease::new(store.clone(), "", "db1", "inst-1", "addr-1", 60);
+        let mut lease = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60);
 
         // First claim
         let role1 = lease.try_claim().await.unwrap();
@@ -567,8 +569,8 @@ mod tests {
     #[tokio::test]
     async fn test_try_claim_active_lease_by_other() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease1 = DbLease::new(store.clone(), "", "db1", "inst-1", "addr-1", 60);
-        let mut lease2 = DbLease::new(store, "", "db1", "inst-2", "addr-2", 60);
+        let mut lease1 = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60);
+        let mut lease2 = DbLease::new(store, "db1/_lease.json", "inst-2", "addr-2", 60);
 
         // Instance 1 claims
         lease1.try_claim().await.unwrap();
@@ -599,7 +601,7 @@ mod tests {
             .unwrap();
 
         // New instance tries to claim the expired lease
-        let mut lease = DbLease::new(store, "", "db1", "inst-2", "addr-2", 60);
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-2", "addr-2", 60);
         let role = lease.try_claim().await.unwrap();
         assert_eq!(role, Role::Leader);
         assert!(lease.has_etag());
@@ -612,7 +614,7 @@ mod tests {
     #[tokio::test]
     async fn test_renew_success() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60);
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60);
 
         lease.try_claim().await.unwrap();
         let session_before = lease.session_id().to_string();
@@ -628,8 +630,8 @@ mod tests {
     #[tokio::test]
     async fn test_renew_cas_conflict() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease1 = DbLease::new(store.clone(), "", "db1", "inst-1", "addr-1", 60);
-        let mut lease2 = DbLease::new(store, "", "db1", "inst-2", "addr-2", 60);
+        let mut lease1 = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60);
+        let mut lease2 = DbLease::new(store, "db1/_lease.json", "inst-2", "addr-2", 60);
 
         // Instance 1 claims
         lease1.try_claim().await.unwrap();
@@ -661,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn test_renew_without_etag() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60);
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60);
 
         // Try to renew without claiming first
         let result = lease.renew().await;
@@ -676,7 +678,7 @@ mod tests {
     #[tokio::test]
     async fn test_release() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease = DbLease::new(store.clone(), "", "db1", "inst-1", "addr-1", 60);
+        let mut lease = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60);
 
         lease.try_claim().await.unwrap();
         assert!(lease.has_etag());
@@ -696,7 +698,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_sleeping_success() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60);
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60);
 
         lease.try_claim().await.unwrap();
         let set = lease.set_sleeping().await.unwrap();
@@ -711,7 +713,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_sleeping_without_etag() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60);
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60);
 
         // Try to set sleeping without claiming first
         let result = lease.set_sleeping().await;
@@ -722,8 +724,8 @@ mod tests {
     #[tokio::test]
     async fn test_set_sleeping_cas_conflict() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease1 = DbLease::new(store.clone(), "", "db1", "inst-1", "addr-1", 60);
-        let mut lease2 = DbLease::new(store, "", "db1", "inst-2", "addr-2", 60);
+        let mut lease1 = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60);
+        let mut lease2 = DbLease::new(store, "db1/_lease.json", "inst-2", "addr-2", 60);
 
         // Instance 1 claims
         lease1.try_claim().await.unwrap();
@@ -757,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_no_lease() {
         let store = Arc::new(MockLeaseStore::new());
-        let lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60);
+        let lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60);
 
         let result = lease.read().await.unwrap();
         assert!(result.is_none());
@@ -766,7 +768,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_existing_lease() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60);
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60);
 
         lease.try_claim().await.unwrap();
 
@@ -783,7 +785,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_id_changes_on_new_claim() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease1 = DbLease::new(store.clone(), "", "db1", "inst-1", "addr-1", 60);
+        let mut lease1 = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60);
 
         lease1.try_claim().await.unwrap();
         let session1 = lease1.session_id().to_string();
@@ -799,7 +801,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_id_persists_on_renewal() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60);
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60);
 
         lease.try_claim().await.unwrap();
         let session1 = lease.session_id().to_string();
@@ -817,8 +819,8 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_claim_both_cannot_be_leader() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease1 = DbLease::new(store.clone(), "", "db1", "inst-1", "addr-1", 60);
-        let mut lease2 = DbLease::new(store, "", "db1", "inst-2", "addr-2", 60);
+        let mut lease1 = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60);
+        let mut lease2 = DbLease::new(store, "db1/_lease.json", "inst-2", "addr-2", 60);
 
         // Both try to claim simultaneously
         let (role1, role2) = tokio::join!(lease1.try_claim(), lease2.try_claim());
@@ -837,7 +839,7 @@ mod tests {
     #[tokio::test]
     async fn test_lease_lifecycle() {
         let store = Arc::new(MockLeaseStore::new());
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60);
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60);
 
         // Initial claim
         let role = lease.try_claim().await.unwrap();
@@ -870,7 +872,7 @@ mod tests {
         let store = Arc::new(InMemoryLeaseStore::new());
         let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60)
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
             .with_fence_token(fence.clone());
 
         assert_eq!(fence.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -888,7 +890,7 @@ mod tests {
         let store = Arc::new(InMemoryLeaseStore::new());
         let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60)
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
             .with_fence_token(fence.clone());
 
         lease.try_claim().await.unwrap();
@@ -907,7 +909,7 @@ mod tests {
         let store = Arc::new(InMemoryLeaseStore::new());
         let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60)
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
             .with_fence_token(fence.clone());
 
         lease.try_claim().await.unwrap();
@@ -922,9 +924,9 @@ mod tests {
         let store = Arc::new(InMemoryLeaseStore::new());
         let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-        let mut lease1 = DbLease::new(store.clone(), "", "db1", "inst-1", "addr-1", 60)
+        let mut lease1 = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60)
             .with_fence_token(fence.clone());
-        let mut lease2 = DbLease::new(store, "", "db1", "inst-2", "addr-2", 60);
+        let mut lease2 = DbLease::new(store, "db1/_lease.json", "inst-2", "addr-2", 60);
 
         // inst-1 claims
         lease1.try_claim().await.unwrap();
@@ -947,7 +949,7 @@ mod tests {
         let store = Arc::new(InMemoryLeaseStore::new());
         let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-        let mut lease = DbLease::new(store, "", "db1", "inst-1", "addr-1", 60)
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
             .with_fence_token(fence.clone());
 
         lease.try_claim().await.unwrap();

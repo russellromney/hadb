@@ -1,11 +1,11 @@
 //! HttpManifestStore: ManifestStore implementation over HTTP.
 //!
 //! HTTP API contract:
-//!   GET  /v1/manifest?key=...  -> 200 { manifest: HaManifest } or 404
-//!   POST /v1/manifest?key=...  -> 201 { etag: "..." } or 409 (conflict)
-//!                                 Body: { manifest: HaManifest, expected_version: u64|null }
-//!   HEAD /v1/manifest?key=...  -> 200 with X-Manifest-Version, X-Writer-Id, X-Lease-Epoch headers
-//!                                 or 404
+//!   GET  /v1/sync/manifest?key=...  -> 200 { manifest: HaManifest } or 404
+//!   POST /v1/sync/manifest?key=...  -> 201 { etag: "..." } or 409 (conflict)
+//!                                      Body: { manifest: HaManifest, expected_version: u64|null }
+//!   HEAD /v1/sync/manifest?key=...  -> 200 with X-Manifest-Version, X-Writer-Id, X-Lease-Epoch headers
+//!                                      or 404
 //!
 //! The manifest key is passed as a query param. The Bearer token scopes
 //! access to the database.
@@ -69,7 +69,7 @@ impl HttpManifestStore {
 
     fn manifest_url(&self, key: &str) -> String {
         format!(
-            "{}/v1/manifest?key={}",
+            "{}/v1/sync/manifest?key={}",
             self.endpoint,
             urlencoding::encode(key)
         )
@@ -329,9 +329,9 @@ mod tests {
 
     fn mock_app(state: MockState) -> Router {
         Router::new()
-            .route("/v1/manifest", get(mock_get))
-            .route("/v1/manifest", post(mock_put))
-            .route("/v1/manifest", head(mock_head))
+            .route("/v1/sync/manifest", get(mock_get))
+            .route("/v1/sync/manifest", post(mock_put))
+            .route("/v1/sync/manifest", head(mock_head))
             .with_state(state)
     }
 

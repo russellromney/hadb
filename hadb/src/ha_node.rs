@@ -131,10 +131,10 @@ impl HaNode {
     /// that handles renewal (if Leader) or monitoring (if Follower). Returns the
     /// initial role.
     pub async fn start(self: &Arc<Self>) -> Result<Role> {
+        let lease_key = format!("{}{}/_lease.json", self.config.lease_prefix, "__engine__");
         let mut lease = DbLease::new(
             self.lease_store.clone(),
-            &self.config.lease_prefix,
-            "__engine__",
+            &lease_key,
             &self.config.instance_id,
             &self.config.address,
             self.config.ttl_secs,

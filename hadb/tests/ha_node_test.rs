@@ -225,8 +225,7 @@ fn test_ha_node_with_follower_behavior(
 async fn claim_as_other(lease_store: &Arc<dyn LeaseStore>, ttl_secs: u64) {
     let mut other = DbLease::new(
         lease_store.clone(),
-        "test/",
-        "__engine__",
+        "test/__engine__/_lease.json",
         "other-engine",
         "10.0.0.2:6379",
         ttl_secs,
@@ -805,8 +804,7 @@ async fn test_engine_lease_loss_demotes_all_databases() {
     // pre-claim and node.start().
     let mut other_lease = DbLease::new(
         lease_store.clone(),
-        "test/",
-        "__engine__",
+        "test/__engine__/_lease.json",
         "other-engine",
         "10.0.0.2:6379",
         5, // 5 second TTL (was 1, which could expire before node.start())

@@ -1,0 +1,19 @@
+[package]
+name = "hadb-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Storage backend trait + Fence primitive for the hadb ecosystem. Trait-only; impls live in separate crates (hadb-storage-s3, hadb-storage-local, etc)."
+keywords = ["ha", "storage", "s3", "blob"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+arc-swap = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

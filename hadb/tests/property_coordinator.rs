@@ -29,8 +29,7 @@ proptest! {
 
                     let mut lease = hadb::DbLease::new(
                         store.clone(),
-                        "test/",
-                        "db1",
+                        "test/db1/_lease.json",
                         &lease_config.instance_id,
                         &lease_config.address,
                         lease_config.ttl_secs,

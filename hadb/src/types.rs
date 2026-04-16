@@ -195,6 +195,11 @@ pub struct CoordinatorConfig {
     /// Storage clients read this to include Fence-Token on writes.
     /// None = no fence enforcement (backward compat).
     pub fence_token: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Override the lease key. When set, this exact string is used as the
+    /// lease key in the LeaseStore. Intended for token-scoped backends that
+    /// already carry database identity out-of-band (e.g., HTTP with Bearer
+    /// tokens). None = legacy compound key `"{prefix}{db_name}/_lease.json"`.
+    pub lease_key: Option<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -207,6 +212,7 @@ impl Default for CoordinatorConfig {
             replicator_timeout: Duration::from_secs(30),
             manifest_poll_interval: Duration::from_secs(1),
             fence_token: None,
+            lease_key: None,
         }
     }
 }
