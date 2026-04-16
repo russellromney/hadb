@@ -2,6 +2,8 @@
 members = [
     "hadb",
     "hadb-storage",
+    "hadb-storage-mem",
+    "hadb-storage-local",
     "hadb-lease",
     "hadb-io",
     "hadb-lease-s3",
