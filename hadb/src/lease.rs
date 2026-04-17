@@ -87,10 +87,28 @@ impl DbLease {
 
     /// Publish the current etag (parsed as a `u64` lease revision) into
     /// the fence. No-op if no writer was attached.
+    ///
+    /// If a writer *is* attached but the etag doesn't parse as `u64`, we
+    /// clear the fence and log. Letting it silently skip the update would
+    /// leave a stale revision in place while the lease believes itself
+    /// fresh -- the writer then issues fenced writes with a revision the
+    /// server has long superseded and gets confusing "former leader"
+    /// rejections. This is the "no silent failures" rule: either the
+    /// lease backend produces u64 etags (Cinch, NATS KV) or the caller
+    /// should not attach a fence_writer.
     fn update_fence_token(&self) {
         if let (Some(ref writer), Some(ref etag)) = (&self.fence_writer, &self.current_etag) {
-            if let Ok(rev) = etag.parse::<u64>() {
-                writer.set(rev);
+            match etag.parse::<u64>() {
+                Ok(rev) => writer.set(rev),
+                Err(_) => {
+                    tracing::error!(
+                        lease_key = %self.lease_key,
+                        etag = %etag,
+                        "DbLease has a fence_writer but the lease store returned a non-u64 etag; \
+                         clearing fence to force writes to fail fast rather than carry a stale revision"
+                    );
+                    writer.clear();
+                }
             }
         }
     }
