@@ -11,6 +11,8 @@
 //! let store = HttpLeaseStore::new("https://lease-proxy.example.com", "my-token");
 //! ```
 
+pub mod fence;
 pub mod lease_store;
 
+pub use fence::{AtomicFence, AtomicFenceWriter};
 pub use lease_store::HttpLeaseStore;

@@ -6,6 +6,7 @@
 //! rejecting stale fences server-side).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use axum::{
@@ -18,7 +19,9 @@ use axum::{
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use hadb_storage::{Fence, StorageBackend};
+use hadb_lease::FenceSource;
+use hadb_lease_http::AtomicFence;
+use hadb_storage::StorageBackend;
 use hadb_storage_cinch::CinchHttpStorage;
 
 // ── Mock server ────────────────────────────────────────────────────────────
@@ -31,6 +34,15 @@ struct MockState {
     required_fence: Arc<Mutex<Option<u64>>>,
     /// Auth token the server expects.
     token: String,
+    /// If > 0, the next N requests that touch these counters return 503.
+    /// Used to exercise retry/backoff paths. Decremented once per triggered
+    /// 503 response.
+    flaky_write_failures: Arc<AtomicU32>,
+    /// If > 0, the next N list requests return `{keys: [], is_truncated: true}`
+    /// to simulate a protocol-violating server. Decremented per triggered 503.
+    empty_truncated_count: Arc<AtomicU32>,
+    /// If set, the next batch-delete response reports `N` keys in `failed`.
+    batch_delete_failed_count: Arc<AtomicU32>,
 }
 
 impl MockState {
@@ -39,6 +51,9 @@ impl MockState {
             objects: Arc::new(Mutex::new(HashMap::new())),
             required_fence: Arc::new(Mutex::new(None)),
             token: token.to_string(),
+            flaky_write_failures: Arc::new(AtomicU32::new(0)),
+            empty_truncated_count: Arc::new(AtomicU32::new(0)),
+            batch_delete_failed_count: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -68,6 +83,19 @@ async fn check_fence(state: &MockState, headers: &HeaderMap) -> Result<(), Statu
     }
 }
 
+/// Returns `true` iff this request should be rejected with 503 (to exercise
+/// client-side retry). Decrements the counter on success.
+fn trigger_flaky(state: &MockState) -> bool {
+    let prev = state.flaky_write_failures.load(Ordering::SeqCst);
+    if prev == 0 {
+        return false;
+    }
+    state
+        .flaky_write_failures
+        .fetch_sub(1, Ordering::SeqCst);
+    true
+}
+
 async fn mock_put(
     State(state): State<MockState>,
     Path(key): Path<String>,
@@ -76,6 +104,9 @@ async fn mock_put(
 ) -> Result<StatusCode, StatusCode> {
     if !check_auth(&headers, &state.token) {
         return Err(StatusCode::UNAUTHORIZED);
+    }
+    if trigger_flaky(&state) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     check_fence(&state, &headers).await?;
 
@@ -99,7 +130,6 @@ async fn mock_put(
 }
 
 fn etag_for(bytes: &[u8]) -> String {
-    // Simple content-based etag for tests; real server uses its own scheme.
     format!("\"{}\"", bytes.len())
 }
 
@@ -117,7 +147,6 @@ async fn mock_get(
     };
 
     if let Some(range) = headers.get("range").and_then(|v| v.to_str().ok()) {
-        // Parse "bytes=start-end"
         if let Some(rest) = range.strip_prefix("bytes=") {
             if let Some((s, e)) = rest.split_once('-') {
                 let start: usize = s.parse().unwrap_or(0);
@@ -174,6 +203,19 @@ async fn mock_list(
     if !check_auth(&headers, &state.token) {
         return Err(StatusCode::UNAUTHORIZED);
     }
+
+    // Protocol-violation simulator: return empty-but-truncated for the
+    // configured number of responses, then behave normally.
+    if state.empty_truncated_count.load(Ordering::SeqCst) > 0 {
+        state
+            .empty_truncated_count
+            .fetch_sub(1, Ordering::SeqCst);
+        return Ok(Json(serde_json::json!({
+            "keys": Vec::<String>::new(),
+            "is_truncated": true,
+        })));
+    }
+
     let objects = state.objects.lock().await;
     let prefix = params.prefix.unwrap_or_default();
     let after = params.after.unwrap_or_default();
@@ -204,14 +246,26 @@ async fn mock_batch_delete(
         return Err(StatusCode::UNAUTHORIZED);
     }
     check_fence(&state, &headers).await?;
+
     let mut objects = state.objects.lock().await;
+    let fail_n = state.batch_delete_failed_count.load(Ordering::SeqCst) as usize;
     let mut deleted = 0usize;
-    for k in &body.keys {
+    let mut failed: Vec<String> = Vec::new();
+    for (i, k) in body.keys.iter().enumerate() {
+        if i < fail_n {
+            failed.push(k.clone());
+            continue;
+        }
         if objects.remove(k).is_some() {
             deleted += 1;
         }
     }
-    Ok(Json(serde_json::json!({ "deleted": deleted })))
+    // Reset the simulator after one batch.
+    state.batch_delete_failed_count.store(0, Ordering::SeqCst);
+    Ok(Json(serde_json::json!({
+        "deleted": deleted,
+        "failed": failed,
+    })))
 }
 
 fn mock_app(state: MockState) -> Router {
@@ -338,14 +392,11 @@ async fn put_if_match_advances_and_rejects_stale() {
     let (url, _h) = start_mock(state).await;
     let s = store(&url, "tok");
 
-    // Seed an object so we know its etag (server returns "<len>" for the body).
     s.put("k", b"hi").await.unwrap();
-    // Mock server's etag is the len in quotes; put_if_match sends that via If-Match.
     let good = r#""2""#;
     let ok = s.put_if_match("k", b"hello", good).await.unwrap();
     assert!(ok.success);
 
-    // Now the content is 5 bytes; stale etag "2" must be rejected.
     let stale = s.put_if_match("k", b"xxx", good).await.unwrap();
     assert!(!stale.success);
 }
@@ -391,8 +442,6 @@ async fn write_without_fence_when_server_requires_fails() {
     *state.required_fence.lock().await = Some(7);
     let (url, _h) = start_mock(state).await;
 
-    // No Fence attached to the store — writes don't send a Fence-Token header;
-    // the server rejects with 412.
     let s = store(&url, "tok");
     let err = s.put("k", b"v").await.unwrap_err();
     assert!(err.to_string().contains("412"));
@@ -404,9 +453,9 @@ async fn write_with_correct_fence_succeeds() {
     *state.required_fence.lock().await = Some(7);
     let (url, _h) = start_mock(state).await;
 
-    let (fence, writer) = Fence::new();
+    let (fence, writer) = AtomicFence::new();
     writer.set(7);
-    let s = store(&url, "tok").with_fence(fence);
+    let s = store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
 
     s.put("k", b"v").await.unwrap();
     assert_eq!(s.get("k").await.unwrap().unwrap(), b"v");
@@ -418,9 +467,9 @@ async fn write_with_stale_fence_server_rejects_412() {
     *state.required_fence.lock().await = Some(10);
     let (url, _h) = start_mock(state).await;
 
-    let (fence, writer) = Fence::new();
-    writer.set(7); // Stale — server expects 10.
-    let s = store(&url, "tok").with_fence(fence);
+    let (fence, writer) = AtomicFence::new();
+    writer.set(7); // Stale: server expects 10.
+    let s = store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
 
     let err = s.put("k", b"v").await.unwrap_err();
     assert!(err.to_string().contains("412"));
@@ -431,13 +480,11 @@ async fn write_refuses_when_fence_unset() {
     let state = MockState::new("tok");
     let (url, _h) = start_mock(state).await;
 
-    // Fence attached but no lease claimed yet (writer never called `set`).
-    let (fence, _writer) = Fence::new();
-    let s = store(&url, "tok").with_fence(fence);
+    let (fence, _writer) = AtomicFence::new();
+    let s = store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
 
     let err = s.put("k", b"v").await.unwrap_err();
     assert!(err.to_string().contains("no active lease"));
-    // Server side: the request should never have been sent at all.
 }
 
 #[tokio::test]
@@ -445,9 +492,9 @@ async fn write_refuses_after_fence_cleared() {
     let state = MockState::new("tok");
     let (url, _h) = start_mock(state).await;
 
-    let (fence, writer) = Fence::new();
+    let (fence, writer) = AtomicFence::new();
     writer.set(5);
-    let s = store(&url, "tok").with_fence(fence);
+    let s = store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
     s.put("before", b"").await.unwrap();
 
     writer.clear();
@@ -461,17 +508,16 @@ async fn reads_do_not_require_fence() {
     *state.required_fence.lock().await = Some(7);
     let (url, _h) = start_mock(state).await;
 
-    // Seed a value through a fenced-write path.
     {
-        let (fence, writer) = Fence::new();
+        let (fence, writer) = AtomicFence::new();
         writer.set(7);
-        let writer_store = store(&url, "tok").with_fence(fence);
+        let writer_store =
+            store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
         writer_store.put("k", b"v").await.unwrap();
     }
 
-    // Reader has NO fence; server doesn't check fence on GET.
-    let (fence, _w) = Fence::new();
-    let reader = store(&url, "tok").with_fence(fence);
+    let (fence, _w) = AtomicFence::new();
+    let reader = store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
     assert_eq!(reader.get("k").await.unwrap().unwrap(), b"v");
     assert!(reader.exists("k").await.unwrap());
     let keys = reader.list("", None).await.unwrap();
@@ -484,9 +530,9 @@ async fn delete_requires_fence_when_configured() {
     *state.required_fence.lock().await = Some(7);
     let (url, _h) = start_mock(state).await;
 
-    let (fence, writer) = Fence::new();
+    let (fence, writer) = AtomicFence::new();
     writer.set(7);
-    let s = store(&url, "tok").with_fence(fence);
+    let s = store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
     s.put("k", b"v").await.unwrap();
     s.delete("k").await.unwrap();
     assert!(s.get("k").await.unwrap().is_none());
@@ -498,9 +544,9 @@ async fn batch_delete_uses_fence() {
     *state.required_fence.lock().await = Some(11);
     let (url, _h) = start_mock(state).await;
 
-    let (fence, writer) = Fence::new();
+    let (fence, writer) = AtomicFence::new();
     writer.set(11);
-    let s = store(&url, "tok").with_fence(fence);
+    let s = store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
 
     s.put("a", b"").await.unwrap();
     s.put("b", b"").await.unwrap();
@@ -509,4 +555,121 @@ async fn batch_delete_uses_fence() {
         .await
         .unwrap();
     assert_eq!(deleted, 2);
+}
+
+// ── Regression tests: review-fix findings ──────────────────────────────────
+
+/// C1/K10: `list` must refuse to silently truncate when the server returns
+/// `{keys: [], is_truncated: true}`. Before the fix, pagination ended early.
+#[tokio::test]
+async fn list_rejects_empty_but_truncated_page() {
+    let state = MockState::new("tok");
+    state.empty_truncated_count.store(1, Ordering::SeqCst);
+    let (url, _h) = start_mock(state.clone()).await;
+    let s = store(&url, "tok");
+
+    // Seed something so pagination would otherwise have content to return.
+    state
+        .objects
+        .lock()
+        .await
+        .insert("k".to_string(), b"v".to_vec());
+
+    let err = s.list("", None).await.unwrap_err();
+    assert!(
+        err.to_string().contains("is_truncated"),
+        "expected protocol-violation error, got: {err}"
+    );
+}
+
+/// C2/C3: conditional PUT must retry 5xx (transient) but not retry 412 (CAS).
+#[tokio::test]
+async fn put_if_absent_retries_transient_503() {
+    let state = MockState::new("tok");
+    state.flaky_write_failures.store(2, Ordering::SeqCst);
+    let (url, _h) = start_mock(state).await;
+    let s = store(&url, "tok");
+
+    // First two attempts 503, third succeeds (default max_retries = 3).
+    let r = s.put_if_absent("k", b"v").await.unwrap();
+    assert!(r.success);
+    assert_eq!(s.get("k").await.unwrap().unwrap(), b"v");
+}
+
+#[tokio::test]
+async fn put_if_match_retries_transient_503() {
+    let state = MockState::new("tok");
+    let (url, _h) = start_mock(state.clone()).await;
+    let s = store(&url, "tok");
+
+    s.put("k", b"hi").await.unwrap();
+    let good = r#""2""#;
+
+    // Now arm 2 flaky failures.
+    state.flaky_write_failures.store(2, Ordering::SeqCst);
+    let r = s.put_if_match("k", b"hello", good).await.unwrap();
+    assert!(r.success);
+}
+
+/// C4: `delete_many` must surface explicit per-key server failures as Err,
+/// not swallow them with a reduced count.
+#[tokio::test]
+async fn delete_many_fails_on_server_reported_failures() {
+    let state = MockState::new("tok");
+    state.batch_delete_failed_count.store(1, Ordering::SeqCst);
+    let (url, _h) = start_mock(state).await;
+    let s = store(&url, "tok");
+
+    s.put("a", b"").await.unwrap();
+    s.put("b", b"").await.unwrap();
+
+    // Server will report 1 key failed; client must return Err.
+    let err = s
+        .delete_many(&["a".into(), "b".into()])
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("failed"),
+        "expected per-key-failure error, got: {err}"
+    );
+}
+
+/// C5: unsafe URL chars in keys must be percent-encoded so the server sees
+/// the correct path. Before the fix, a `?` in the key truncated the path.
+#[tokio::test]
+async fn url_unsafe_keys_roundtrip() {
+    let state = MockState::new("tok");
+    let (url, _h) = start_mock(state).await;
+    let s = store(&url, "tok");
+
+    // Keys with ?, #, space, %, and unicode must all roundtrip correctly.
+    let keys = [
+        "foo?bar",
+        "a b/c",
+        "100%",
+        "tag#1",
+        "ünïcödé/x",
+    ];
+    for k in &keys {
+        s.put(k, k.as_bytes()).await.unwrap();
+    }
+    for k in &keys {
+        let got = s.get(k).await.unwrap().expect("should be present");
+        assert_eq!(got, k.as_bytes(), "roundtrip failed for key {k:?}");
+    }
+
+    // list() reveals them all
+    let listed = s.list("", None).await.unwrap();
+    for k in &keys {
+        assert!(
+            listed.iter().any(|l| l == *k),
+            "listed keys missing {k:?}: {listed:?}"
+        );
+    }
+
+    // delete() works on unsafe keys
+    for k in &keys {
+        s.delete(k).await.unwrap();
+        assert!(s.get(k).await.unwrap().is_none());
+    }
 }

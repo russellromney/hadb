@@ -18,8 +18,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+hadb-lease = { path = "../hadb-lease", version = "0.4.0" }
+percent-encoding = "2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 axum = { workspace = true }
 uuid = { workspace = true }
+# Pulled in for tests only: gives the mock-server tests the real
+# AtomicFence type so we exercise the production wiring shape. Not a
+# production dep; keeps the runtime dep graph trait-only.
+hadb-lease-http = { path = "../hadb-lease-http", version = "0.4.0" }

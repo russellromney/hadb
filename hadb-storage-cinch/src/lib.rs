@@ -19,19 +19,19 @@
 //!
 //! # Fence
 //!
-//! If constructed with a [`Fence`] via [`CinchHttpStorage::with_fence`],
-//! every write calls `fence.require()` first and refuses (with
-//! `NoActiveLease`) to issue a write when no lease is held. If no fence
-//! is configured, writes proceed without a `Fence-Token` header — useful
-//! for single-writer deployments and for tests.
+//! If constructed with an `Arc<dyn FenceSource>` via
+//! [`CinchHttpStorage::with_fence`], every write calls `fence.require()`
+//! first and refuses (with `NoActiveLease`) to issue a write when no
+//! lease is held. If no fence is configured, writes proceed without a
+//! `Fence-Token` header: useful for single-writer deployments and tests.
 //!
 //! # CAS
 //!
 //! `put_if_absent` / `put_if_match` send standard HTTP `If-None-Match` /
 //! `If-Match` headers. A 412 response is surfaced as
-//! `CasResult { success: false }`. Whether the server honours these is
-//! separate from this client; lease/manifest stores use their own
-//! dedicated routes for strict CAS.
+//! `CasResult { success: false }` and does not retry (CAS conflicts are
+//! signals, not transients). 5xx / 429 / transport errors retry with
+//! exponential backoff, matching the other write paths.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -39,16 +39,39 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{RequestBuilder, StatusCode};
 use serde::Deserialize;
 
-use hadb_storage::{CasResult, Fence, StorageBackend};
+use hadb_lease::FenceSource;
+use hadb_storage::{CasResult, StorageBackend};
 
 /// Default retry count for transient HTTP failures.
 pub const DEFAULT_MAX_RETRIES: u32 = 3;
 
 /// Default request timeout.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Characters that must be percent-encoded inside a URL path segment.
+/// `/` is intentionally allowed so hierarchical keys (`p/d/0_v1`) pass
+/// through unchanged; everything that could break path parsing (`?`, `#`,
+/// `%`, space, etc.) gets encoded.
+const PATH_UNSAFE: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'[')
+    .add(b']')
+    .add(b'\\')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 pub struct CinchHttpStorage {
     client: reqwest::Client,
@@ -57,7 +80,7 @@ pub struct CinchHttpStorage {
     /// URL path segment after `/v1/sync/`, e.g. `"pages"` for turbolite page
     /// storage, `"wal"` for walrust WAL frames.
     prefix: String,
-    fence: Option<Fence>,
+    fence: Option<Arc<dyn FenceSource>>,
     max_retries: u32,
     fetch_count: Arc<AtomicU64>,
     fetch_bytes: Arc<AtomicU64>,
@@ -102,9 +125,9 @@ impl CinchHttpStorage {
         }
     }
 
-    /// Attach a fence; writes will require a current lease and send
-    /// `Fence-Token` headers. Without this, writes are unfenced.
-    pub fn with_fence(mut self, fence: Fence) -> Self {
+    /// Attach a fence source. Writes will require a current lease revision
+    /// and send `Fence-Token` headers. Without this, writes are unfenced.
+    pub fn with_fence(mut self, fence: Arc<dyn FenceSource>) -> Self {
         self.fence = Some(fence);
         self
     }
@@ -139,15 +162,22 @@ impl CinchHttpStorage {
     }
 
     fn object_url(&self, key: &str) -> String {
-        format!("{}/v1/sync/{}/{}", self.endpoint, self.prefix, key)
+        let encoded_prefix = utf8_percent_encode(&self.prefix, PATH_UNSAFE);
+        let encoded_key = utf8_percent_encode(key, PATH_UNSAFE);
+        format!(
+            "{}/v1/sync/{}/{}",
+            self.endpoint, encoded_prefix, encoded_key
+        )
     }
 
     fn list_url(&self) -> String {
-        format!("{}/v1/sync/{}", self.endpoint, self.prefix)
+        let encoded_prefix = utf8_percent_encode(&self.prefix, PATH_UNSAFE);
+        format!("{}/v1/sync/{}", self.endpoint, encoded_prefix)
     }
 
     fn batch_delete_url(&self) -> String {
-        format!("{}/v1/sync/{}/_delete", self.endpoint, self.prefix)
+        let encoded_prefix = utf8_percent_encode(&self.prefix, PATH_UNSAFE);
+        format!("{}/v1/sync/{}/_delete", self.endpoint, encoded_prefix)
     }
 
     /// Add `Fence-Token` header to a write. Returns an error if a fence is
@@ -339,37 +369,73 @@ impl StorageBackend for CinchHttpStorage {
                 .json()
                 .await
                 .with_context(|| format!("LIST {url} JSON parse"))?;
+
+            // Check pagination BEFORE considering emptiness: an
+            // empty-but-truncated page is a protocol violation, not an
+            // early-terminate signal.
+            if body.is_truncated && body.keys.is_empty() {
+                return Err(anyhow!(
+                    "LIST {url} returned is_truncated=true with empty keys; \
+                     server protocol violation, refusing to continue"
+                ));
+            }
+
             if body.keys.is_empty() {
                 break;
             }
-            let last = body.keys.last().cloned();
+
+            let last = body
+                .keys
+                .last()
+                .cloned()
+                .expect("keys non-empty just checked above");
             keys.extend(body.keys);
+
             if !body.is_truncated {
                 break;
             }
-            match last {
-                Some(k) => cursor = Some(k),
-                None => break,
-            }
+            cursor = Some(last);
         }
         Ok(keys)
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {
         let url = self.object_url(key);
-        let resp = self
-            .client
-            .head(&url)
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .with_context(|| format!("HEAD {url} transport failed"))?;
-        match resp.status() {
-            StatusCode::OK => Ok(true),
-            StatusCode::NOT_FOUND => Ok(false),
-            s => {
-                let body = resp.text().await.unwrap_or_default();
-                Err(anyhow!("HEAD {url} returned {s}: {body}"))
+        let mut attempt = 0u32;
+        loop {
+            let resp = self
+                .client
+                .head(&url)
+                .bearer_auth(&self.token)
+                .send()
+                .await;
+            match resp {
+                Ok(r) if r.status() == StatusCode::OK => return Ok(true),
+                Ok(r) if r.status() == StatusCode::NOT_FOUND => return Ok(false),
+                Ok(r) if Self::is_transient_status(r.status()) => {
+                    attempt += 1;
+                    if attempt >= self.max_retries {
+                        return Err(anyhow!(
+                            "HEAD {url} returned {} after {attempt} attempts",
+                            r.status()
+                        ));
+                    }
+                    self.backoff(attempt).await;
+                }
+                Ok(r) => {
+                    let s = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    return Err(anyhow!("HEAD {url} returned {s}: {body}"));
+                }
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= self.max_retries {
+                        return Err(anyhow!(
+                            "HEAD {url} transport failed after {attempt} attempts: {e}"
+                        ));
+                    }
+                    self.backoff(attempt).await;
+                }
             }
         }
     }
@@ -377,34 +443,58 @@ impl StorageBackend for CinchHttpStorage {
     async fn put_if_absent(&self, key: &str, data: &[u8]) -> Result<CasResult> {
         let url = self.object_url(key);
         let len = data.len() as u64;
-        let req = self
-            .client
-            .put(&url)
-            .bearer_auth(&self.token)
-            .header("If-None-Match", "*")
-            .body(data.to_vec());
-        let req = self.apply_fence(req)?;
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("PUT-if-absent {url} transport failed"))?;
-        match resp.status() {
-            s if s.is_success() => {
-                self.put_count.fetch_add(1, Ordering::Relaxed);
-                self.put_bytes.fetch_add(len, Ordering::Relaxed);
-                let etag = extract_etag(&resp);
-                Ok(CasResult {
-                    success: true,
-                    etag,
-                })
-            }
-            StatusCode::PRECONDITION_FAILED | StatusCode::CONFLICT => Ok(CasResult {
-                success: false,
-                etag: None,
-            }),
-            s => {
-                let body = resp.text().await.unwrap_or_default();
-                Err(anyhow!("PUT-if-absent {url} returned {s}: {body}"))
+        let mut attempt = 0u32;
+        loop {
+            let req = self
+                .client
+                .put(&url)
+                .bearer_auth(&self.token)
+                .header("If-None-Match", "*")
+                .body(data.to_vec());
+            let req = self.apply_fence(req)?;
+            match req.send().await {
+                Ok(r) if r.status().is_success() => {
+                    self.put_count.fetch_add(1, Ordering::Relaxed);
+                    self.put_bytes.fetch_add(len, Ordering::Relaxed);
+                    let etag = extract_etag(&r);
+                    return Ok(CasResult {
+                        success: true,
+                        etag,
+                    });
+                }
+                Ok(r) if r.status() == StatusCode::PRECONDITION_FAILED
+                    || r.status() == StatusCode::CONFLICT =>
+                {
+                    // CAS signal, not transient; do not retry.
+                    return Ok(CasResult {
+                        success: false,
+                        etag: None,
+                    });
+                }
+                Ok(r) if Self::is_transient_status(r.status()) => {
+                    attempt += 1;
+                    if attempt >= self.max_retries {
+                        return Err(anyhow!(
+                            "PUT-if-absent {url} returned {} after {attempt} attempts",
+                            r.status()
+                        ));
+                    }
+                    self.backoff(attempt).await;
+                }
+                Ok(r) => {
+                    let s = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    return Err(anyhow!("PUT-if-absent {url} returned {s}: {body}"));
+                }
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= self.max_retries {
+                        return Err(anyhow!(
+                            "PUT-if-absent {url} transport failed after {attempt} attempts: {e}"
+                        ));
+                    }
+                    self.backoff(attempt).await;
+                }
             }
         }
     }
@@ -412,34 +502,57 @@ impl StorageBackend for CinchHttpStorage {
     async fn put_if_match(&self, key: &str, data: &[u8], etag: &str) -> Result<CasResult> {
         let url = self.object_url(key);
         let len = data.len() as u64;
-        let req = self
-            .client
-            .put(&url)
-            .bearer_auth(&self.token)
-            .header("If-Match", etag)
-            .body(data.to_vec());
-        let req = self.apply_fence(req)?;
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("PUT-if-match {url} transport failed"))?;
-        match resp.status() {
-            s if s.is_success() => {
-                self.put_count.fetch_add(1, Ordering::Relaxed);
-                self.put_bytes.fetch_add(len, Ordering::Relaxed);
-                let new_etag = extract_etag(&resp);
-                Ok(CasResult {
-                    success: true,
-                    etag: new_etag,
-                })
-            }
-            StatusCode::PRECONDITION_FAILED | StatusCode::CONFLICT => Ok(CasResult {
-                success: false,
-                etag: None,
-            }),
-            s => {
-                let body = resp.text().await.unwrap_or_default();
-                Err(anyhow!("PUT-if-match {url} returned {s}: {body}"))
+        let mut attempt = 0u32;
+        loop {
+            let req = self
+                .client
+                .put(&url)
+                .bearer_auth(&self.token)
+                .header("If-Match", etag)
+                .body(data.to_vec());
+            let req = self.apply_fence(req)?;
+            match req.send().await {
+                Ok(r) if r.status().is_success() => {
+                    self.put_count.fetch_add(1, Ordering::Relaxed);
+                    self.put_bytes.fetch_add(len, Ordering::Relaxed);
+                    let new_etag = extract_etag(&r);
+                    return Ok(CasResult {
+                        success: true,
+                        etag: new_etag,
+                    });
+                }
+                Ok(r) if r.status() == StatusCode::PRECONDITION_FAILED
+                    || r.status() == StatusCode::CONFLICT =>
+                {
+                    return Ok(CasResult {
+                        success: false,
+                        etag: None,
+                    });
+                }
+                Ok(r) if Self::is_transient_status(r.status()) => {
+                    attempt += 1;
+                    if attempt >= self.max_retries {
+                        return Err(anyhow!(
+                            "PUT-if-match {url} returned {} after {attempt} attempts",
+                            r.status()
+                        ));
+                    }
+                    self.backoff(attempt).await;
+                }
+                Ok(r) => {
+                    let s = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    return Err(anyhow!("PUT-if-match {url} returned {s}: {body}"));
+                }
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= self.max_retries {
+                        return Err(anyhow!(
+                            "PUT-if-match {url} transport failed after {attempt} attempts: {e}"
+                        ));
+                    }
+                    self.backoff(attempt).await;
+                }
             }
         }
     }
@@ -449,7 +562,9 @@ impl StorageBackend for CinchHttpStorage {
             return Ok(Some(Vec::new()));
         }
         let url = self.object_url(key);
-        let range = format!("bytes={}-{}", start, start + len as u64 - 1);
+        // Saturating arithmetic avoids overflow when start is near u64::MAX.
+        let end = start.saturating_add((len as u64).saturating_sub(1));
+        let range = format!("bytes={start}-{end}");
         let mut attempt = 0u32;
         loop {
             let resp = self
@@ -522,6 +637,20 @@ impl StorageBackend for CinchHttpStorage {
                 .json()
                 .await
                 .with_context(|| format!("batch-DELETE {url} JSON parse"))?;
+            // `deleted` may legitimately be smaller than `chunk.len()` when
+            // some keys were already absent (delete is idempotent). Surface
+            // explicit per-key failures from the server if present.
+            if !body.failed.is_empty() {
+                return Err(anyhow!(
+                    "batch-DELETE {url}: {} of {} keys failed; first failure: {}",
+                    body.failed.len(),
+                    chunk.len(),
+                    body.failed
+                        .first()
+                        .map(|f| f.as_str())
+                        .unwrap_or("<none>"),
+                ));
+            }
             total += body.deleted;
         }
         Ok(total)
@@ -549,14 +678,21 @@ struct ListResponse {
 #[derive(Debug, Deserialize)]
 struct BatchDeleteResponse {
     deleted: usize,
+    #[serde(default)]
+    failed: Vec<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hadb_lease::NoActiveLease;
 
-    // Construction + plumbing. Integration tests use a mock axum server in
-    // `tests/mock_server.rs`.
+    struct StaticFence(Option<u64>);
+    impl FenceSource for StaticFence {
+        fn current(&self) -> Option<u64> {
+            self.0
+        }
+    }
 
     #[test]
     fn new_defaults_are_sensible() {
@@ -570,8 +706,8 @@ mod tests {
 
     #[test]
     fn with_fence_attaches_fence_handle() {
-        let (fence, _w) = Fence::new();
-        let s = CinchHttpStorage::new("https://example.com", "tok", "pages").with_fence(fence);
+        let s = CinchHttpStorage::new("https://example.com", "tok", "pages")
+            .with_fence(Arc::new(StaticFence(Some(1))));
         assert!(s.fence.is_some());
     }
 
@@ -588,10 +724,7 @@ mod tests {
             s.object_url("p/d/0_v1"),
             "https://example.com/v1/sync/pages/p/d/0_v1"
         );
-        assert_eq!(
-            s.list_url(),
-            "https://example.com/v1/sync/pages"
-        );
+        assert_eq!(s.list_url(), "https://example.com/v1/sync/pages");
         assert_eq!(
             s.batch_delete_url(),
             "https://example.com/v1/sync/pages/_delete"
@@ -599,17 +732,34 @@ mod tests {
     }
 
     #[test]
+    fn object_url_percent_encodes_unsafe_chars() {
+        let s = CinchHttpStorage::new("https://example.com", "tok", "pages");
+        // `?`, `#`, ` `, `%` must be encoded; `/` must pass through.
+        assert_eq!(
+            s.object_url("foo?bar"),
+            "https://example.com/v1/sync/pages/foo%3Fbar"
+        );
+        assert_eq!(
+            s.object_url("a b/c#d"),
+            "https://example.com/v1/sync/pages/a%20b/c%23d"
+        );
+        assert_eq!(
+            s.object_url("100%"),
+            "https://example.com/v1/sync/pages/100%25"
+        );
+    }
+
+    #[test]
     fn apply_fence_without_fence_is_noop() {
         let s = CinchHttpStorage::new("https://example.com", "tok", "pages");
-        // Building a dummy request just to confirm apply_fence returns Ok.
         let req = s.client.put("https://example.com/x");
         assert!(s.apply_fence(req).is_ok());
     }
 
     #[test]
     fn apply_fence_with_unset_fence_errors() {
-        let (fence, _w) = Fence::new();
-        let s = CinchHttpStorage::new("https://example.com", "tok", "pages").with_fence(fence);
+        let s = CinchHttpStorage::new("https://example.com", "tok", "pages")
+            .with_fence(Arc::new(StaticFence(None)));
         let req = s.client.put("https://example.com/x");
         let err = s.apply_fence(req).unwrap_err();
         assert!(err.to_string().contains("no active lease"));
@@ -617,9 +767,8 @@ mod tests {
 
     #[test]
     fn apply_fence_with_set_fence_succeeds() {
-        let (fence, writer) = Fence::new();
-        writer.set(42);
-        let s = CinchHttpStorage::new("https://example.com", "tok", "pages").with_fence(fence);
+        let s = CinchHttpStorage::new("https://example.com", "tok", "pages")
+            .with_fence(Arc::new(StaticFence(Some(42))));
         let req = s.client.put("https://example.com/x");
         assert!(s.apply_fence(req).is_ok());
     }
@@ -631,6 +780,13 @@ mod tests {
         assert_eq!(s.bytes_put(), 0);
         assert_eq!(s.fetch_count(), 0);
         assert_eq!(s.put_count(), 0);
+    }
+
+    #[test]
+    fn no_active_lease_error_round_trip() {
+        // Sanity check that the re-exported error type still implements Error.
+        let e: Result<u64, NoActiveLease> = Err(NoActiveLease);
+        assert!(e.is_err());
     }
 
     // Send/Sync + object safety.

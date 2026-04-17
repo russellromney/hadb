@@ -1,7 +1,7 @@
 //! `hadb-storage-s3`: S3-compatible `StorageBackend` implementation.
 //!
-//! Works with AWS S3, Tigris, MinIO, Cloudflare R2, Wasabi — any service
-//! that speaks the S3 API.
+//! Works with AWS S3, Tigris, MinIO, Cloudflare R2, Wasabi, or any other
+//! service that speaks the S3 API.
 //!
 //! # CAS
 //!
@@ -14,7 +14,7 @@
 //!
 //! GET / PUT / DELETE / LIST retry transient errors with exponential backoff
 //! (default 3 attempts, 100ms → 200ms → 400ms). Conditional writes do NOT
-//! retry on 412 — that's a CAS signal, not a transient failure.
+//! retry on 412 (that's a CAS signal, not a transient failure).
 //!
 //! # Metrics
 //!
@@ -316,60 +316,93 @@ impl StorageBackend for S3Storage {
     async fn put_if_absent(&self, key: &str, data: &[u8]) -> Result<CasResult> {
         let full = self.full_key(key);
         let len = data.len() as u64;
-        let body = ByteStream::from(data.to_vec());
-        match self
-            .client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(&full)
-            .body(body)
-            .if_none_match("*")
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                self.put_count.fetch_add(1, Ordering::Relaxed);
-                self.put_bytes.fetch_add(len, Ordering::Relaxed);
-                Ok(CasResult {
-                    success: true,
-                    etag: resp.e_tag().map(|s| s.to_string()),
-                })
+        let mut attempt = 0u32;
+        loop {
+            let body = ByteStream::from(data.to_vec());
+            match self
+                .client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&full)
+                .body(body)
+                .if_none_match("*")
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    self.put_count.fetch_add(1, Ordering::Relaxed);
+                    self.put_bytes.fetch_add(len, Ordering::Relaxed);
+                    return Ok(CasResult {
+                        success: true,
+                        etag: resp.e_tag().map(|s| s.to_string()),
+                    });
+                }
+                // 412 is a CAS signal, not a transient error; return immediately.
+                Err(e) if is_precondition_failed(&e) => {
+                    return Ok(CasResult {
+                        success: false,
+                        etag: None,
+                    })
+                }
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= self.max_retries {
+                        return Err(anyhow!(
+                            "S3 PUT-if-absent {full} failed after {attempt} attempts: {e}"
+                        ));
+                    }
+                    tracing::debug!(
+                        "S3 PUT-if-absent {full} attempt {attempt} failed: {e}; retrying"
+                    );
+                    self.backoff(attempt).await;
+                }
             }
-            Err(e) if is_precondition_failed(&e) => Ok(CasResult {
-                success: false,
-                etag: None,
-            }),
-            Err(e) => Err(anyhow!("S3 PUT-if-absent {full} failed: {e}")),
         }
     }
 
     async fn put_if_match(&self, key: &str, data: &[u8], etag: &str) -> Result<CasResult> {
         let full = self.full_key(key);
         let len = data.len() as u64;
-        let body = ByteStream::from(data.to_vec());
-        match self
-            .client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(&full)
-            .body(body)
-            .if_match(etag)
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                self.put_count.fetch_add(1, Ordering::Relaxed);
-                self.put_bytes.fetch_add(len, Ordering::Relaxed);
-                Ok(CasResult {
-                    success: true,
-                    etag: resp.e_tag().map(|s| s.to_string()),
-                })
+        let mut attempt = 0u32;
+        loop {
+            let body = ByteStream::from(data.to_vec());
+            match self
+                .client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&full)
+                .body(body)
+                .if_match(etag)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    self.put_count.fetch_add(1, Ordering::Relaxed);
+                    self.put_bytes.fetch_add(len, Ordering::Relaxed);
+                    return Ok(CasResult {
+                        success: true,
+                        etag: resp.e_tag().map(|s| s.to_string()),
+                    });
+                }
+                Err(e) if is_precondition_failed(&e) => {
+                    return Ok(CasResult {
+                        success: false,
+                        etag: None,
+                    })
+                }
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= self.max_retries {
+                        return Err(anyhow!(
+                            "S3 PUT-if-match {full} failed after {attempt} attempts: {e}"
+                        ));
+                    }
+                    tracing::debug!(
+                        "S3 PUT-if-match {full} attempt {attempt} failed: {e}; retrying"
+                    );
+                    self.backoff(attempt).await;
+                }
             }
-            Err(e) if is_precondition_failed(&e) => Ok(CasResult {
-                success: false,
-                etag: None,
-            }),
-            Err(e) => Err(anyhow!("S3 PUT-if-match {full} failed: {e}")),
         }
     }
 
@@ -378,7 +411,9 @@ impl StorageBackend for S3Storage {
             return Ok(Some(Vec::new()));
         }
         let full = self.full_key(key);
-        let range = format!("bytes={}-{}", start, start + len as u64 - 1);
+        // Saturating arithmetic avoids overflow when start is near u64::MAX.
+        let end = start.saturating_add((len as u64).saturating_sub(1));
+        let range = format!("bytes={start}-{end}");
         let mut attempt = 0u32;
         loop {
             match self
@@ -443,16 +478,31 @@ impl StorageBackend for S3Storage {
                 .send()
                 .await
                 .map_err(|e| anyhow!("S3 DELETE-objects failed: {e}"))?;
-            let errors = result.errors().len();
-            let deleted = chunk.len().saturating_sub(errors);
-            total += deleted;
-            if errors > 0 {
-                tracing::warn!(
-                    "S3 delete_many: {} of {} keys failed in chunk",
-                    errors,
-                    chunk.len()
-                );
+
+            // Per-key errors are explicit server signals ("we tried, we
+            // failed"), distinct from "key was absent" (which S3 treats as
+            // success). Surface them as a hard error: compaction/GC
+            // callers need to see orphaned objects immediately, not
+            // discover them later from a buried warning.
+            let errs = result.errors();
+            if !errs.is_empty() {
+                let first = errs
+                    .first()
+                    .map(|e| {
+                        format!(
+                            "{}: {}",
+                            e.key().unwrap_or("<unknown>"),
+                            e.message().unwrap_or("<no message>")
+                        )
+                    })
+                    .unwrap_or_else(|| "<no detail>".to_string());
+                return Err(anyhow!(
+                    "S3 DELETE-objects: {} of {} keys failed; first: {first}",
+                    errs.len(),
+                    chunk.len(),
+                ));
             }
+            total += chunk.len();
         }
         Ok(total)
     }
@@ -467,7 +517,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    // Construct without contacting S3 — validates plumbing.
+    // Construct without contacting S3 (validates plumbing).
     fn dummy_client() -> Client {
         let conf = aws_sdk_s3::Config::builder()
             .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())

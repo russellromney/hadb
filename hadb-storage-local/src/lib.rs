@@ -6,15 +6,26 @@
 //!
 //! `put_if_match` uses a per-key `tokio::Mutex` to serialise the
 //! "compare etag + commit" sequence. The etag is the stored file's
-//! `(size, mtime_nanos)` pair encoded as a string — good enough for local
+//! `(size, mtime_nanos)` pair encoded as a string: good enough for local
 //! CAS given the serialisation, though not meant for production scale.
 //!
 //! # Intended scope
 //!
 //! This backend is for local development, single-node setups, and tests
-//! that want a filesystem instead of a HashMap. It is not a distributed
-//! store: two processes writing the same root race each other's renames,
-//! and the per-key mutex is in-process.
+//! that want a filesystem instead of a HashMap. Two hard limits to keep
+//! in mind:
+//!
+//! 1. **Single-process only.** The per-key `tokio::Mutex` that guards the
+//!    `put_if_match` compare-and-swap sequence lives in memory; two
+//!    processes writing under the same `root` race each other's renames
+//!    and can both commit a CAS update. Use a distributed backend for
+//!    multi-process workloads.
+//! 2. **Etags are not stable across restarts** or across filesystems.
+//!    The etag is `(size, mtime_nanos)`; restoring from backup, rsync'ing,
+//!    or any operation that rewrites the mtime without changing content
+//!    invalidates previously held etags. Callers that persist an etag
+//!    somewhere else (a manifest pointer, for example) must re-read it
+//!    after any such operation.
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, SeekFrom};
