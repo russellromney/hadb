@@ -898,4 +898,105 @@ mod tests {
             "fence should increase on set_sleeping: {fence_after_claim} -> {fence_after_sleeping}",
         );
     }
+
+    /// Lease store whose etags are opaque strings, not u64s. Models S3's
+    /// behaviour (quoted ETag hex) and any other backend that doesn't
+    /// produce numeric revisions.
+    struct OpaqueEtagStore {
+        data: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
+    }
+    impl OpaqueEtagStore {
+        fn new() -> Self {
+            Self {
+                data: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl LeaseStore for OpaqueEtagStore {
+        async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
+            Ok(self.data.lock().unwrap().get(key).cloned())
+        }
+        async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult> {
+            let mut store = self.data.lock().unwrap();
+            if store.contains_key(key) {
+                return Ok(CasResult { success: false, etag: None });
+            }
+            let etag = format!("\"{:x}\"", uuid::Uuid::new_v4().as_u128());
+            store.insert(key.to_string(), (data, etag.clone()));
+            Ok(CasResult { success: true, etag: Some(etag) })
+        }
+        async fn write_if_match(&self, key: &str, data: Vec<u8>, etag: &str) -> Result<CasResult> {
+            let mut store = self.data.lock().unwrap();
+            match store.get(key) {
+                Some((_, current)) if current == etag => {
+                    let new_etag = format!("\"{:x}\"", uuid::Uuid::new_v4().as_u128());
+                    store.insert(key.to_string(), (data, new_etag.clone()));
+                    Ok(CasResult { success: true, etag: Some(new_etag) })
+                }
+                _ => Ok(CasResult { success: false, etag: None }),
+            }
+        }
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.data.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    /// Phase Anvil i review fix: if `DbLease` is handed a `fence_writer` but
+    /// the lease store's etag isn't parseable as u64, the fence must be
+    /// CLEARED (not silently skipped). Carrying a stale revision while the
+    /// lease manager believes itself fresh is the "former leader writes"
+    /// data-corruption scenario. Failing fast (NoActiveLease) is the
+    /// correct outcome per CLAUDE.md "no silent failures".
+    #[tokio::test]
+    async fn test_fence_cleared_on_non_u64_etag() {
+        let store = Arc::new(OpaqueEtagStore::new());
+        let (fence, writer) = AtomicFence::new();
+
+        // Manually seed the writer so we can observe that it gets CLEARED
+        // rather than left at a stale value.
+        writer.set(42);
+        assert_eq!(fence.current(), Some(42), "preseeded fence is visible");
+
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
+            .with_fence_writer(Arc::new(writer));
+
+        let role = lease.try_claim().await.expect("claim");
+        assert_eq!(role, Role::Leader, "opaque-etag backend still supports CAS claim");
+
+        // The fence must now be None. The key invariant: downstream storage
+        // adapters calling `fence.require()` get `NoActiveLease` (write fails
+        // fast) instead of the stale `42` (write carries a revision the
+        // server will reject as former-leader). The old code left `42` here.
+        assert_eq!(
+            fence.current(),
+            None,
+            "fence must clear when the etag doesn't parse as u64; leaving a stale \
+             revision is the silent-failure bug the Anvil-i review fix closed"
+        );
+    }
+
+    /// Follow-up: renew doesn't restore the fence either; the opaque etag
+    /// keeps producing non-u64 values, so every write must keep failing.
+    /// Pins the contract that bad etags are terminal for fence-enforced
+    /// writes (rather than intermittent).
+    #[tokio::test]
+    async fn test_fence_stays_cleared_across_renew_with_opaque_etag() {
+        let store = Arc::new(OpaqueEtagStore::new());
+        let (fence, writer) = AtomicFence::new();
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
+            .with_fence_writer(Arc::new(writer));
+
+        lease.try_claim().await.unwrap();
+        assert_eq!(fence.current(), None, "first claim clears");
+
+        let renewed = lease.renew().await.unwrap();
+        assert!(renewed, "renew with valid etag succeeds");
+        assert_eq!(
+            fence.current(),
+            None,
+            "renew must keep fence cleared since etag is still opaque"
+        );
+    }
 }
