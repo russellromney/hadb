@@ -28,4 +28,4 @@ uuid = { workspace = true }
 # Pulled in for tests only: gives the mock-server tests the real
 # AtomicFence type so we exercise the production wiring shape. Not a
 # production dep; keeps the runtime dep graph trait-only.
-hadb-lease-http = { path = "../hadb-lease-http", version = "0.4.0" }
+hadb-lease-cinch = { path = "../hadb-lease-cinch", version = "0.4.0" }

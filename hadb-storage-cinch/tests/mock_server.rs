@@ -20,7 +20,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use hadb_lease::FenceSource;
-use hadb_lease_http::AtomicFence;
+use hadb_lease_cinch::AtomicFence;
 use hadb_storage::StorageBackend;
 use hadb_storage_cinch::CinchHttpStorage;
 

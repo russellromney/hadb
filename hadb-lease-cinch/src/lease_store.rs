@@ -1,7 +1,8 @@
-//! HttpLeaseStore: LeaseStore implementation over HTTP.
+//! CinchLeaseStore: LeaseStore implementation over the Cinch HTTP lease
+//! protocol.
 //!
-//! Translates CAS lease operations to HTTP requests against a fenced
-//! leader lease API (e.g., Grabby /v1/lease).
+//! Translates CAS lease operations to HTTP requests against Grabby's (or
+//! engine's embedded) /v1/lease routes.
 //!
 //! HTTP API contract:
 //!   POST   /v1/lease?key=...  -> 201 { fence }              (acquire, 409 if taken)
@@ -37,13 +38,13 @@ struct LeaseWriteResponse {
 /// Authenticates with a Bearer token. The server owns any database/tenant
 /// scoping: the token identifies the scope, the `key` identifies the
 /// lease within it (e.g., `"writer"`).
-pub struct HttpLeaseStore {
+pub struct CinchLeaseStore {
     client: reqwest::Client,
     endpoint: String,
     token: String,
 }
 
-impl HttpLeaseStore {
+impl CinchLeaseStore {
     /// Create a new HTTP lease store. `token` is sent as a Bearer token on
     /// every request; the server scopes leases by whatever that token
     /// identifies.
@@ -97,7 +98,7 @@ mod urlencoding {
 }
 
 #[async_trait]
-impl LeaseStore for HttpLeaseStore {
+impl LeaseStore for CinchLeaseStore {
     async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
         let resp = self
             .client
@@ -378,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_nonexistent() {
         let (url, _h) = start_mock_server().await;
-        let store = HttpLeaseStore::new(&url, "test-token");
+        let store = CinchLeaseStore::new(&url, "test-token");
         let result = store.read("no-such-key").await.expect("read should succeed");
         assert!(result.is_none());
     }
@@ -386,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn test_acquire_and_read() {
         let (url, _h) = start_mock_server().await;
-        let store = HttpLeaseStore::new(&url, "test-token");
+        let store = CinchLeaseStore::new(&url, "test-token");
 
         let cas = store
             .write_if_not_exists("lease1", b"node-a".to_vec())
@@ -403,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn test_acquire_conflict() {
         let (url, _h) = start_mock_server().await;
-        let store = HttpLeaseStore::new(&url, "test-token");
+        let store = CinchLeaseStore::new(&url, "test-token");
 
         let first = store
             .write_if_not_exists("lease1", b"node-a".to_vec())
@@ -422,7 +423,7 @@ mod tests {
     #[tokio::test]
     async fn test_heartbeat_with_correct_fence() {
         let (url, _h) = start_mock_server().await;
-        let store = HttpLeaseStore::new(&url, "test-token");
+        let store = CinchLeaseStore::new(&url, "test-token");
 
         let acquire = store
             .write_if_not_exists("lease1", b"v1".to_vec())
@@ -445,7 +446,7 @@ mod tests {
     #[tokio::test]
     async fn test_heartbeat_stale_fence() {
         let (url, _h) = start_mock_server().await;
-        let store = HttpLeaseStore::new(&url, "test-token");
+        let store = CinchLeaseStore::new(&url, "test-token");
 
         let acquire = store
             .write_if_not_exists("lease1", b"v1".to_vec())
@@ -468,7 +469,7 @@ mod tests {
     #[tokio::test]
     async fn test_release_and_read() {
         let (url, _h) = start_mock_server().await;
-        let store = HttpLeaseStore::new(&url, "test-token");
+        let store = CinchLeaseStore::new(&url, "test-token");
 
         store
             .write_if_not_exists("lease1", b"node-a".to_vec())
@@ -484,7 +485,7 @@ mod tests {
     #[tokio::test]
     async fn test_release_idempotent() {
         let (url, _h) = start_mock_server().await;
-        let store = HttpLeaseStore::new(&url, "test-token");
+        let store = CinchLeaseStore::new(&url, "test-token");
         store
             .delete("never-existed")
             .await
@@ -494,7 +495,7 @@ mod tests {
     #[tokio::test]
     async fn test_release_then_reacquire() {
         let (url, _h) = start_mock_server().await;
-        let store = HttpLeaseStore::new(&url, "test-token");
+        let store = CinchLeaseStore::new(&url, "test-token");
 
         store
             .write_if_not_exists("lease1", b"v1".to_vec())
@@ -515,7 +516,7 @@ mod tests {
     #[tokio::test]
     async fn test_special_characters_in_key() {
         let (url, _h) = start_mock_server().await;
-        let store = HttpLeaseStore::new(&url, "test-token");
+        let store = CinchLeaseStore::new(&url, "test-token");
 
         let key = "embedded/db-123/_lease.json";
         let cas = store
@@ -531,7 +532,7 @@ mod tests {
     #[tokio::test]
     async fn test_fence_is_numeric_string() {
         let (url, _h) = start_mock_server().await;
-        let store = HttpLeaseStore::new(&url, "test-token");
+        let store = CinchLeaseStore::new(&url, "test-token");
 
         let cas = store
             .write_if_not_exists("lease1", b"data".to_vec())

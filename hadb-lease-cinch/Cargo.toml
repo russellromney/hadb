@@ -1,12 +1,12 @@
 [package]
-name = "hadb-lease-http"
+name = "hadb-lease-cinch"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "HTTP lease store for hadb"
-keywords = ["ha", "http", "lease", "coordination"]
+description = "Cinch-protocol HTTP lease store for hadb. Speaks the /v1/lease routes with Bearer auth, and provides AtomicFence/AtomicFenceWriter for fencing storage writes."
+keywords = ["ha", "cinch", "lease", "coordination"]
 categories = ["database", "network-programming"]
 
 [dependencies]
