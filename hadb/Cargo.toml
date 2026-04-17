@@ -25,6 +25,7 @@ reqwest = { workspace = true }
 
 # hadb abstraction crates
 hadb-lease = { path = "../hadb-lease", version = "0.4.0" }
+hadb-lease-mem = { path = "../hadb-lease-mem", version = "0.4.0" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

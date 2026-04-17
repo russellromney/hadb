@@ -278,92 +278,10 @@ impl DbLease {
     }
 }
 
-// ============================================================================
-// InMemoryLeaseStore — for testing without S3
-// ============================================================================
-
-/// In-memory lease store for testing.
-///
-/// Thread-safe via `std::sync::Mutex` (held briefly, never across await points).
-/// Use this in unit/integration tests instead of requiring real S3.
-pub struct InMemoryLeaseStore {
-    leases: std::sync::Mutex<std::collections::HashMap<String, (Vec<u8>, String)>>,
-    /// Monotonically increasing revision counter (matches NATS KV behavior).
-    revision: std::sync::atomic::AtomicU64,
-}
-
-impl InMemoryLeaseStore {
-    pub fn new() -> Self {
-        Self {
-            leases: std::sync::Mutex::new(std::collections::HashMap::new()),
-            revision: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-
-    fn next_revision(&self) -> String {
-        self.revision.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            .wrapping_add(1)
-            .to_string()
-    }
-}
-
-impl Default for InMemoryLeaseStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::LeaseStore for InMemoryLeaseStore {
-    async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
-        Ok(self.leases.lock().unwrap().get(key).cloned())
-    }
-
-    async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<crate::CasResult> {
-        let mut leases = self.leases.lock().unwrap();
-        if leases.contains_key(key) {
-            Ok(crate::CasResult {
-                success: false,
-                etag: None,
-            })
-        } else {
-            let etag = self.next_revision();
-            leases.insert(key.to_string(), (data, etag.clone()));
-            Ok(crate::CasResult {
-                success: true,
-                etag: Some(etag),
-            })
-        }
-    }
-
-    async fn write_if_match(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        expected_etag: &str,
-    ) -> Result<crate::CasResult> {
-        let mut leases = self.leases.lock().unwrap();
-        match leases.get(key) {
-            Some((_, current_etag)) if current_etag == expected_etag => {
-                let new_etag = self.next_revision();
-                leases.insert(key.to_string(), (data, new_etag.clone()));
-                Ok(crate::CasResult {
-                    success: true,
-                    etag: Some(new_etag),
-                })
-            }
-            _ => Ok(crate::CasResult {
-                success: false,
-                etag: None,
-            }),
-        }
-    }
-
-    async fn delete(&self, key: &str) -> Result<()> {
-        self.leases.lock().unwrap().remove(key);
-        Ok(())
-    }
-}
+// InMemoryLeaseStore lives in `hadb-lease-mem` now; re-exported from this
+// crate for backwards-compatibility with callers that did
+// `use hadb::InMemoryLeaseStore`.
+pub use hadb_lease_mem::InMemoryLeaseStore;
 
 #[cfg(test)]
 mod tests {

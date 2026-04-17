@@ -1,0 +1,18 @@
+[package]
+name = "hadb-lease-mem"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "In-memory LeaseStore impl for hadb-lease. Primarily a test fixture: NATS-KV-like monotonic revisions with real CAS semantics, single-process only."
+keywords = ["ha", "lease", "testing"]
+categories = ["database", "development-tools::testing"]
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+hadb-lease = { path = "../hadb-lease", version = "0.4.0" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
