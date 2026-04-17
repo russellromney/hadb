@@ -1,12 +1,16 @@
 use std::collections::HashMap;
-use std::path::Path;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use hadb_io::ObjectStore;
+use hadb_storage::{CasResult, StorageBackend};
 use tokio::sync::Mutex;
 
-/// In-memory ObjectStore for tests.
+/// In-memory `StorageBackend` for hadb-changeset tests.
+///
+/// Implements the new byte-level trait (`get`/`put`/`delete`/`list` + CAS),
+/// matching the pattern used by `hadb-storage-mem::MemStorage`. Kept inline
+/// here (not depending on `hadb-storage-mem`) so this tiny helper stays
+/// hermetic to the `hadb-changeset` crate.
 pub struct InMemoryObjectStore {
     objects: Mutex<HashMap<String, Vec<u8>>>,
 }
@@ -31,64 +35,37 @@ impl InMemoryObjectStore {
     }
 }
 
+impl Default for InMemoryObjectStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
-impl ObjectStore for InMemoryObjectStore {
-    async fn upload_bytes(&self, key: &str, data: Vec<u8>) -> Result<()> {
-        self.objects.lock().await.insert(key.to_string(), data);
-        Ok(())
+impl StorageBackend for InMemoryObjectStore {
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.objects.lock().await.get(key).cloned())
     }
 
-    async fn upload_bytes_with_checksum(&self, key: &str, data: Vec<u8>, _checksum: &str) -> Result<()> {
-        self.upload_bytes(key, data).await
-    }
-
-    async fn upload_file(&self, key: &str, path: &Path) -> Result<()> {
-        let data = tokio::fs::read(path).await?;
-        self.upload_bytes(key, data).await
-    }
-
-    async fn upload_file_with_checksum(&self, key: &str, path: &Path, _checksum: &str) -> Result<()> {
-        self.upload_file(key, path).await
-    }
-
-    async fn download_bytes(&self, key: &str) -> Result<Vec<u8>> {
+    async fn put(&self, key: &str, data: &[u8]) -> Result<()> {
         self.objects
             .lock()
             .await
-            .get(key)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("key not found: {}", key))
-    }
-
-    async fn download_file(&self, key: &str, path: &Path) -> Result<()> {
-        let data = self.download_bytes(key).await?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(path, data).await?;
+            .insert(key.to_string(), data.to_vec());
         Ok(())
     }
 
-    async fn list_objects(&self, prefix: &str) -> Result<Vec<String>> {
-        let mut keys: Vec<String> = self
-            .objects
-            .lock()
-            .await
-            .keys()
-            .filter(|k| k.starts_with(prefix))
-            .cloned()
-            .collect();
-        keys.sort();
-        Ok(keys)
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.objects.lock().await.remove(key);
+        Ok(())
     }
 
-    async fn list_objects_after(&self, prefix: &str, start_after: &str) -> Result<Vec<String>> {
-        let mut keys: Vec<String> = self
-            .objects
-            .lock()
-            .await
+    async fn list(&self, prefix: &str, after: Option<&str>) -> Result<Vec<String>> {
+        let map = self.objects.lock().await;
+        let mut keys: Vec<String> = map
             .keys()
-            .filter(|k| k.starts_with(prefix) && k.as_str() > start_after)
+            .filter(|k| k.starts_with(prefix))
+            .filter(|k| after.map(|a| k.as_str() > a).unwrap_or(true))
             .cloned()
             .collect();
         keys.sort();
@@ -99,27 +76,27 @@ impl ObjectStore for InMemoryObjectStore {
         Ok(self.objects.lock().await.contains_key(key))
     }
 
-    async fn get_checksum(&self, _key: &str) -> Result<Option<String>> {
-        Ok(None)
-    }
-
-    async fn delete_object(&self, key: &str) -> Result<()> {
-        self.objects.lock().await.remove(key);
-        Ok(())
-    }
-
-    async fn delete_objects(&self, keys: &[String]) -> Result<usize> {
-        let mut objects = self.objects.lock().await;
-        let mut deleted = 0;
-        for key in keys {
-            if objects.remove(key).is_some() {
-                deleted += 1;
-            }
+    async fn put_if_absent(&self, key: &str, data: &[u8]) -> Result<CasResult> {
+        let mut map = self.objects.lock().await;
+        if map.contains_key(key) {
+            return Ok(CasResult { success: false, etag: None });
         }
-        Ok(deleted)
+        map.insert(key.to_string(), data.to_vec());
+        Ok(CasResult {
+            success: true,
+            etag: Some("test".into()),
+        })
     }
 
-    fn bucket_name(&self) -> &str {
-        "test-bucket"
+    async fn put_if_match(&self, key: &str, data: &[u8], _etag: &str) -> Result<CasResult> {
+        let mut map = self.objects.lock().await;
+        if !map.contains_key(key) {
+            return Ok(CasResult { success: false, etag: None });
+        }
+        map.insert(key.to_string(), data.to_vec());
+        Ok(CasResult {
+            success: true,
+            etag: Some("test".into()),
+        })
     }
 }
