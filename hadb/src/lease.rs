@@ -3,6 +3,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{LeaseStore, Role};
+use hadb_lease::AtomicFenceWriter;
 
 /// Lease data stored in LeaseStore (S3, etcd, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,10 +46,10 @@ pub struct DbLease {
     current_etag: Option<String>,
     /// Generated fresh on every new claim (not renewal).
     session_id: String,
-    /// Shared fence token, updated on every successful claim/renew.
-    /// Storage clients read this to include Fence-Token on writes.
-    /// None = no external observer (backward compat).
-    fence_token: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Exclusive writer side of the fence. The paired `AtomicFence` is the
+    /// reader that storage adapters hold. `None` = no external observer
+    /// (tests and single-writer deployments that don't fence).
+    fence_writer: Option<Arc<AtomicFenceWriter>>,
 }
 
 impl DbLease {
@@ -72,30 +73,32 @@ impl DbLease {
             ttl_secs,
             current_etag: None,
             session_id: uuid::Uuid::new_v4().to_string(),
-            fence_token: None,
+            fence_writer: None,
         }
     }
 
-    /// Set a shared fence token that gets updated on every successful
-    /// lease claim/renew. Storage clients use this for Fence-Token headers.
-    pub fn with_fence_token(mut self, token: Arc<std::sync::atomic::AtomicU64>) -> Self {
-        self.fence_token = Some(token);
+    /// Attach the writer half of an `AtomicFence`. Callers pair this with
+    /// an `AtomicFence` reader handed to every storage adapter that needs
+    /// fenced writes.
+    pub fn with_fence_writer(mut self, writer: Arc<AtomicFenceWriter>) -> Self {
+        self.fence_writer = Some(writer);
         self
     }
 
-    /// Update the shared fence token from the current etag.
+    /// Publish the current etag (parsed as a `u64` lease revision) into
+    /// the fence. No-op if no writer was attached.
     fn update_fence_token(&self) {
-        if let (Some(ref fence), Some(ref etag)) = (&self.fence_token, &self.current_etag) {
+        if let (Some(ref writer), Some(ref etag)) = (&self.fence_writer, &self.current_etag) {
             if let Ok(rev) = etag.parse::<u64>() {
-                fence.store(rev, std::sync::atomic::Ordering::SeqCst);
+                writer.set(rev);
             }
         }
     }
 
-    /// Clear the shared fence token (lease lost).
+    /// Clear the fence (lease lost). No-op if no writer was attached.
     fn clear_fence_token(&self) {
-        if let Some(ref fence) = self.fence_token {
-            fence.store(0, std::sync::atomic::Ordering::SeqCst);
+        if let Some(ref writer) = self.fence_writer {
+            writer.clear();
         }
     }
 
@@ -785,99 +788,96 @@ mod tests {
     // Fence token integration
     // ========================================================================
 
+    use hadb_lease::AtomicFence;
+
     #[tokio::test]
     async fn test_fence_token_updated_on_claim() {
         let store = Arc::new(InMemoryLeaseStore::new());
-        let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (fence, writer) = AtomicFence::new();
 
         let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
-            .with_fence_token(fence.clone());
+            .with_fence_writer(Arc::new(writer));
 
-        assert_eq!(fence.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(fence.current().is_none());
 
         let role = lease.try_claim().await.unwrap();
         assert_eq!(role, Role::Leader);
 
-        // Fence should be updated to a non-zero value
-        let fence_val = fence.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(fence_val > 0, "fence should be set after claim, got {}", fence_val);
+        let fence_val = fence.current().expect("fence should be set after claim");
+        assert!(fence_val > 0, "fence revision must be > 0, got {fence_val}");
     }
 
     #[tokio::test]
     async fn test_fence_token_updated_on_renew() {
         let store = Arc::new(InMemoryLeaseStore::new());
-        let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (fence, writer) = AtomicFence::new();
 
         let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
-            .with_fence_token(fence.clone());
+            .with_fence_writer(Arc::new(writer));
 
         lease.try_claim().await.unwrap();
-        let fence_after_claim = fence.load(std::sync::atomic::Ordering::SeqCst);
+        let fence_after_claim = fence.current().expect("fence set after claim");
 
         lease.renew().await.unwrap();
-        let fence_after_renew = fence.load(std::sync::atomic::Ordering::SeqCst);
+        let fence_after_renew = fence.current().expect("fence set after renew");
 
-        // Fence should change on renew (new revision)
-        assert!(fence_after_renew > fence_after_claim,
-            "fence should increase on renew: {} -> {}", fence_after_claim, fence_after_renew);
+        assert!(
+            fence_after_renew > fence_after_claim,
+            "fence should increase on renew: {fence_after_claim} -> {fence_after_renew}",
+        );
     }
 
     #[tokio::test]
     async fn test_fence_token_cleared_on_release() {
         let store = Arc::new(InMemoryLeaseStore::new());
-        let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (fence, writer) = AtomicFence::new();
 
         let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
-            .with_fence_token(fence.clone());
+            .with_fence_writer(Arc::new(writer));
 
         lease.try_claim().await.unwrap();
-        assert!(fence.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(fence.current().is_some());
 
         lease.release().await.unwrap();
-        assert_eq!(fence.load(std::sync::atomic::Ordering::SeqCst), 0, "fence should be cleared on release");
+        assert!(fence.current().is_none(), "fence should be cleared on release");
     }
 
     #[tokio::test]
     async fn test_fence_token_cleared_on_renewal_failure() {
         let store = Arc::new(InMemoryLeaseStore::new());
-        let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (fence, writer) = AtomicFence::new();
 
         let mut lease1 = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60)
-            .with_fence_token(fence.clone());
+            .with_fence_writer(Arc::new(writer));
         let mut lease2 = DbLease::new(store, "db1/_lease.json", "inst-2", "addr-2", 60);
 
-        // inst-1 claims
         lease1.try_claim().await.unwrap();
-        assert!(fence.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(fence.current().is_some());
 
-        // inst-2 steals (simulate by deleting and re-claiming)
         lease1.release().await.unwrap();
         lease2.try_claim().await.unwrap();
 
-        // inst-1 tries to renew with stale etag -- should fail
-        // (current_etag is None after release, so renew will error)
-        // Instead, reclaim and let inst-2's claim make inst-1's etag stale
-        // This is tricky to test with InMemoryLeaseStore since release deletes the key.
-        // The important thing is release cleared the fence:
-        assert_eq!(fence.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // inst-1's release cleared the fence. inst-2 has its own (unattached) lease.
+        assert!(fence.current().is_none());
     }
 
     #[tokio::test]
     async fn test_fence_token_updated_on_set_sleeping() {
         let store = Arc::new(InMemoryLeaseStore::new());
-        let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (fence, writer) = AtomicFence::new();
 
         let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
-            .with_fence_token(fence.clone());
+            .with_fence_writer(Arc::new(writer));
 
         lease.try_claim().await.unwrap();
-        let fence_after_claim = fence.load(std::sync::atomic::Ordering::SeqCst);
+        let fence_after_claim = fence.current().expect("fence set after claim");
 
         lease.set_sleeping().await.unwrap();
-        let fence_after_sleeping = fence.load(std::sync::atomic::Ordering::SeqCst);
+        let fence_after_sleeping = fence.current().expect("fence set after sleeping");
 
-        // Fence should change (new revision from CAS write)
-        assert!(fence_after_sleeping > fence_after_claim,
-            "fence should increase on set_sleeping: {} -> {}", fence_after_claim, fence_after_sleeping);
+        assert!(
+            fence_after_sleeping > fence_after_claim,
+            "fence should increase on set_sleeping: {fence_after_claim} -> {fence_after_sleeping}",
+        );
     }
 }

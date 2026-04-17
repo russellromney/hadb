@@ -38,4 +38,3 @@ aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 hadb-lease-s3 = { path = "../hadb-lease-s3" }
 hadb-manifest-s3 = { path = "../hadb-manifest-s3" }
-hadb-io = { path = "../hadb-io", features = ["s3"] }

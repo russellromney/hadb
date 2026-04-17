@@ -21,7 +21,7 @@ use async_trait::async_trait;
 pub use hadb_storage::CasResult;
 
 pub mod fence;
-pub use fence::{FenceSource, NoActiveLease};
+pub use fence::{AtomicFence, AtomicFenceWriter, FenceSource, NoActiveLease};
 
 /// Trait for CAS lease operations on a key-value store.
 ///

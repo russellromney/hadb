@@ -191,10 +191,11 @@ pub struct CoordinatorConfig {
     /// How often followers poll ManifestStore for version changes. Default: 1s.
     /// Only used when a ManifestStore is configured on the Coordinator.
     pub manifest_poll_interval: Duration,
-    /// Shared fence token, updated by DbLease on acquire/renew.
-    /// Storage clients read this to include Fence-Token on writes.
-    /// None = no fence enforcement (backward compat).
-    pub fence_token: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Writer side of an `AtomicFence`, updated by `DbLease` on every
+    /// successful claim/renew. Pair this with an `AtomicFence` reader
+    /// handed to storage adapters that perform fenced writes.
+    /// `None` = no fence enforcement.
+    pub fence_writer: Option<Arc<hadb_lease::AtomicFenceWriter>>,
     /// Override the lease key. When set, this exact string is used as the
     /// lease key in the LeaseStore. Intended for token-scoped backends that
     /// already carry database identity out-of-band (e.g., HTTP with Bearer
@@ -211,7 +212,7 @@ impl Default for CoordinatorConfig {
             follower_pull_interval: Duration::from_secs(1),
             replicator_timeout: Duration::from_secs(30),
             manifest_poll_interval: Duration::from_secs(1),
-            fence_token: None,
+            fence_writer: None,
             lease_key: None,
         }
     }
