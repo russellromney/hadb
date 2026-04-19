@@ -11,7 +11,6 @@ members = [
     "hadb-io",
     "hadb-lease-s3",
     "hadb-lease-nats",
-    "hadb-lease-etcd",
     "hadb-lease-cinch",
     "hadb-manifest-s3",
     "hadb-manifest-nats",

@@ -1,7 +1,7 @@
 //! `hadb-lease`: LeaseStore trait for HA leader election.
 //!
 //! Trait-only. Backend implementations live in sibling crates
-//! (`hadb-lease-s3`, `hadb-lease-nats`, `hadb-lease-etcd`, `hadb-lease-cinch`,
+//! (`hadb-lease-s3`, `hadb-lease-nats`, `hadb-lease-cinch`,
 //! `hadb-lease-mem`).
 //!
 //! # Why trait-only?

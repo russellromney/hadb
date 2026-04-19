@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "LeaseStore trait for hadb HA coordination. Trait-only; impls live in sibling crates (hadb-lease-s3, hadb-lease-nats, hadb-lease-etcd, hadb-lease-cinch)."
+description = "LeaseStore trait for hadb HA coordination. Trait-only; impls live in sibling crates (hadb-lease-s3, hadb-lease-nats, hadb-lease-cinch, hadb-lease-mem)."
 keywords = ["ha", "lease", "leader-election", "coordination"]
 categories = ["database", "network-programming"]
 
