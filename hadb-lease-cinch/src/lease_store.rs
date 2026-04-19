@@ -37,17 +37,22 @@ struct LeaseWriteResponse {
 ///
 /// Authenticates with a Bearer token. The server owns any database/tenant
 /// scoping: the token identifies the scope, the `key` identifies the
-/// lease within it (e.g., `"writer"`).
+/// lease within it (default `"writer"`; override via [`with_lease_key`]).
 pub struct CinchLeaseStore {
     client: reqwest::Client,
     endpoint: String,
     token: String,
+    /// Returned by `key_for(_)` — the on-server lease name within whatever
+    /// scope the token identifies. Defaults to `"writer"` since each token
+    /// covers exactly one writable database.
+    lease_key: String,
 }
 
 impl CinchLeaseStore {
     /// Create a new HTTP lease store. `token` is sent as a Bearer token on
     /// every request; the server scopes leases by whatever that token
-    /// identifies.
+    /// identifies. `key_for(_)` returns `"writer"` by default — override
+    /// with [`with_lease_key`] if you need a different name.
     pub fn new(endpoint: &str, token: &str) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -57,6 +62,7 @@ impl CinchLeaseStore {
             client,
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            lease_key: "writer".to_string(),
         }
     }
 
@@ -66,7 +72,16 @@ impl CinchLeaseStore {
             client,
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            lease_key: "writer".to_string(),
         }
+    }
+
+    /// Override the lease name `key_for(_)` returns. The Coordinator passes
+    /// the database name as `scope`, but Cinch's HTTP server already scopes
+    /// by token, so the scope is intentionally ignored.
+    pub fn with_lease_key(mut self, key: &str) -> Self {
+        self.lease_key = key.to_string();
+        self
     }
 
     fn lease_url(&self, key: &str) -> String {
@@ -99,6 +114,11 @@ mod urlencoding {
 
 #[async_trait]
 impl LeaseStore for CinchLeaseStore {
+    /// Server scopes by token; the per-database `scope` is ignored.
+    fn key_for(&self, _scope: &str) -> String {
+        self.lease_key.clone()
+    }
+
     async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
         let resp = self
             .client

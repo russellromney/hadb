@@ -26,7 +26,7 @@ pub use fence::{AtomicFence, AtomicFenceWriter, FenceSource, NoActiveLease};
 /// Trait for CAS lease operations on a key-value store.
 ///
 /// Used for leader election via conditional writes. Any storage system
-/// with CAS support can implement this: S3 (conditional PUT), etcd (CAS),
+/// with CAS support can implement this: S3 (conditional PUT),
 /// Consul (check-and-set), Redis (SETNX), DynamoDB (conditional writes).
 ///
 /// The coordinator uses this for:
@@ -36,10 +36,23 @@ pub use fence::{AtomicFence, AtomicFenceWriter, FenceSource, NoActiveLease};
 /// - Leader releases lease via `delete` on graceful shutdown
 #[async_trait]
 pub trait LeaseStore: Send + Sync {
+    /// Build the on-store key for a given coordinator scope (typically a
+    /// database name). Backends that wrap each scope in their own
+    /// container (e.g., S3 buckets with structured key paths) override
+    /// this; pass-through backends (`CinchLeaseStore` server-scopes by
+    /// token, `InMemoryLeaseStore` namespaces by HashMap) use the default.
+    ///
+    /// Coordinator calls this once per database at join time and then
+    /// uses the result in the basic `read` / `write_if_*` / `delete`
+    /// operations below.
+    fn key_for(&self, scope: &str) -> String {
+        scope.to_string()
+    }
+
     /// Read a key, returning (data, etag). None if key doesn't exist.
     ///
     /// The etag is an opaque version token used for CAS operations.
-    /// For S3: the ETag header. For etcd: the revision number.
+    /// For S3: the ETag header. For NATS KV: the revision number.
     async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>>;
 
     /// Write only if key doesn't exist (create). CAS.

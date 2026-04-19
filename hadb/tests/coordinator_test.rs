@@ -630,7 +630,9 @@ async fn test_manifest_polling_emits_event_on_version_change() {
     // Pre-claim the lease so our coordinator joins as follower.
     lease_store
         .write_if_not_exists(
-            "test-prefix/ha_db1/_lease.json",
+            // InMemoryLeaseStore uses the default `key_for` (passthrough),
+            // so the on-store key is just the scope name.
+            "ha_db1",
             serde_json::to_vec(&serde_json::json!({
                 "instance_id": "other-node",
                 "address": "10.0.0.99:8080",
@@ -741,7 +743,9 @@ async fn test_manifest_polling_no_event_when_version_unchanged() {
     // Pre-claim lease so we join as follower.
     lease_store
         .write_if_not_exists(
-            "test-prefix/ha_db1/_lease.json",
+            // InMemoryLeaseStore uses the default `key_for` (passthrough),
+            // so the on-store key is just the scope name.
+            "ha_db1",
             serde_json::to_vec(&serde_json::json!({
                 "instance_id": "other-node",
                 "address": "10.0.0.99:8080",

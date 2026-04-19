@@ -228,11 +228,6 @@ pub struct CoordinatorConfig {
     /// handed to storage adapters that perform fenced writes.
     /// `None` = no fence enforcement.
     pub fence_writer: Option<Arc<hadb_lease::AtomicFenceWriter>>,
-    /// Override the lease key. When set, this exact string is used as the
-    /// lease key in the LeaseStore. Intended for token-scoped backends that
-    /// already carry database identity out-of-band (e.g., HTTP with Bearer
-    /// tokens). None = legacy compound key `"{prefix}{db_name}/_lease.json"`.
-    pub lease_key: Option<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -245,7 +240,6 @@ impl Default for CoordinatorConfig {
             replicator_timeout: Duration::from_secs(30),
             manifest_poll_interval: Duration::from_secs(1),
             fence_writer: None,
-            lease_key: None,
         }
     }
 }

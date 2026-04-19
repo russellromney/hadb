@@ -24,16 +24,6 @@ use crate::manifest::ManifestStore;
 use crate::traits::Replicator;
 use crate::types::{CoordinatorConfig, Role, RoleEvent};
 
-/// Resolve the effective lease key for a database.
-/// If `override_key` is set, returns it unchanged. Otherwise builds the
-/// legacy compound key `"{prefix}{name}/_lease.json"` used by S3/NATS backends.
-fn resolve_lease_key(override_key: &Option<String>, prefix: &str, name: &str) -> String {
-    match override_key {
-        Some(k) => k.clone(),
-        None => format!("{}{}/_lease.json", prefix, name),
-    }
-}
-
 /// Atomic wrapper around Role for lock-free reads.
 pub(crate) struct AtomicRole(AtomicU8);
 
@@ -172,7 +162,7 @@ impl Coordinator {
         };
 
         // HA mode: try to claim lease.
-        let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
+        let lease_key = lease_config.store.key_for(name);
         let mut lease = DbLease::new(
             lease_config.store.clone(),
             &lease_key,
@@ -519,7 +509,7 @@ impl Coordinator {
                 }
 
                 if let Some(lease_config) = &self.config.lease {
-                    let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
+                    let lease_key = lease_config.store.key_for(name);
                     let lease = DbLease::new(
                         lease_config.store.clone(),
                         &lease_key,
@@ -636,7 +626,7 @@ impl Coordinator {
 
         let all = registry.discover_all(&self.prefix, name).await?;
 
-        let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
+        let lease_key = lease_config.store.key_for(name);
         let lease = DbLease::new(
             lease_config.store.clone(),
             &lease_key,
@@ -736,7 +726,7 @@ impl Coordinator {
         }
 
         if let Some(lease_config) = &self.config.lease {
-            let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
+            let lease_key = lease_config.store.key_for(name);
             let lease = DbLease::new(
                 lease_config.store.clone(),
                 &lease_key,

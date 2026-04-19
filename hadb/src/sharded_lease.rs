@@ -46,6 +46,13 @@ impl ShardedLeaseStore {
 
 #[async_trait]
 impl LeaseStore for ShardedLeaseStore {
+    fn key_for(&self, scope: &str) -> String {
+        // Whichever shard owns the scope formats its own key. Sharding is
+        // by the *scope*, not the formatted key, so the shard pick is
+        // stable across the whole lifecycle of a given lease.
+        self.shard_for(scope).key_for(scope)
+    }
+
     async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
         self.shard_for(key).read(key).await
     }
