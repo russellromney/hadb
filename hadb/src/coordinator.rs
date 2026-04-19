@@ -322,12 +322,14 @@ impl Coordinator {
                 let pos_for_tasks = follower_position.clone();
                 let cu_for_tasks = follower_caught_up.clone();
 
+                let lease_config_owned = lease_config.clone();
                 let task_handle = tokio::spawn(async move {
                     self_clone
                         .run_follower_tasks(
                             db_name,
                             db_path_buf,
                             lease,
+                            lease_config_owned,
                             shared_role,
                             leader_addr,
                             follower_stop_tx,
@@ -359,12 +361,18 @@ impl Coordinator {
         }
     }
 
-    /// Run follower tasks (pull loop + lease monitor).
+    /// Run follower tasks (pull loop + lease monitor). The caller passes
+    /// `lease_config` in directly because this function is only ever
+    /// reached on the HA path (where `self.config.lease` is already
+    /// `Some`), and threading the config through avoids a redundant
+    /// "panic if missing" lookup here.
+    #[allow(clippy::too_many_arguments)]
     async fn run_follower_tasks(
         self: Arc<Self>,
         db_name: String,
         db_path: std::path::PathBuf,
         lease: DbLease,
+        lease_config: crate::types::LeaseConfig,
         shared_role: Arc<AtomicRole>,
         leader_addr: Arc<RwLock<String>>,
         follower_stop_tx: watch::Sender<bool>,
@@ -373,12 +381,6 @@ impl Coordinator {
         shared_position: Arc<AtomicU64>,
         shared_caught_up: Arc<AtomicBool>,
     ) {
-        let lease_config = self
-            .config
-            .lease
-            .as_ref()
-            .expect("lease must be present");
-
         // Spawn follower pull loop
         let follower_handle = {
             let behavior = self.follower_behavior.clone();
