@@ -1,36 +1,16 @@
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
 
 use crate::{LeaseStore, Role};
 use hadb_lease::AtomicFenceWriter;
 
-/// Lease data stored in LeaseStore (S3, etcd, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LeaseData {
-    pub instance_id: String,
-    /// Network address of the leader (for client discovery).
-    #[serde(default)]
-    pub address: String,
-    pub claimed_at: u64,
-    pub ttl_secs: u64,
-    /// Unique per leadership claim. Changes on every promotion, even if the same
-    /// instance reclaims. Clients poll for a new session_id after failures.
-    #[serde(default)]
-    pub session_id: String,
-    /// When true, the leader is shutting down gracefully (e.g., Fly scale-to-zero).
-    /// Followers should call on_sleep and exit rather than promote.
-    #[serde(default)]
-    pub sleeping: bool,
-}
-
-impl LeaseData {
-    /// Whether this lease has expired based on current time.
-    pub fn is_expired(&self) -> bool {
-        let now = chrono::Utc::now().timestamp() as u64;
-        now >= self.claimed_at + self.ttl_secs
-    }
-}
+// Phase Shoal: `LeaseData` now lives in the `hadb-lease` trait crate so
+// every `LeaseStore` impl + every lease-aware client (embedded
+// replicas, cinch's lease orchestrator, ...) can agree on the on-wire
+// shape without depending on the full `hadb` coordinator crate.
+// Re-exported for back-compat so existing imports (`hadb::LeaseData`,
+// `haqlite::LeaseData`) keep working.
+pub use hadb_lease::LeaseData;
 
 /// Per-database CAS lease manager.
 ///
@@ -379,60 +359,6 @@ mod tests {
             store.remove(key);
             Ok(())
         }
-    }
-
-    // ========================================================================
-    // LeaseData tests
-    // ========================================================================
-
-    #[test]
-    fn test_lease_data_not_expired() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let lease = LeaseData {
-            instance_id: "test".to_string(),
-            address: "localhost:8080".to_string(),
-            claimed_at: now,
-            ttl_secs: 60,
-            session_id: "session-1".to_string(),
-            sleeping: false,
-        };
-        assert!(!lease.is_expired());
-    }
-
-    #[test]
-    fn test_lease_data_expired() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let lease = LeaseData {
-            instance_id: "test".to_string(),
-            address: "localhost:8080".to_string(),
-            claimed_at: now.saturating_sub(120), // 120 seconds ago
-            ttl_secs: 60,
-            session_id: "session-1".to_string(),
-            sleeping: false,
-        };
-        assert!(lease.is_expired());
-    }
-
-    #[test]
-    fn test_lease_data_serialization() {
-        let lease = LeaseData {
-            instance_id: "test-instance".to_string(),
-            address: "localhost:9000".to_string(),
-            claimed_at: 1234567890,
-            ttl_secs: 30,
-            session_id: "session-abc".to_string(),
-            sleeping: true,
-        };
-
-        let json = serde_json::to_string(&lease).unwrap();
-        let deserialized: LeaseData = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(deserialized.instance_id, "test-instance");
-        assert_eq!(deserialized.address, "localhost:9000");
-        assert_eq!(deserialized.claimed_at, 1234567890);
-        assert_eq!(deserialized.ttl_secs, 30);
-        assert_eq!(deserialized.session_id, "session-abc");
-        assert!(deserialized.sleeping);
     }
 
     // ========================================================================
