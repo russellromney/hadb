@@ -68,7 +68,8 @@ struct DbEntry {
     leader_address: Arc<RwLock<String>>,
     cancel_tx: watch::Sender<bool>,
     task_handle: JoinHandle<()>,
-    /// Path to the database file. Stored for promote/demote cycles (HaNode).
+    /// Path to the database file. Stored for follower → leader catch-up
+    /// inside the lease monitor task (see `follower::run_lease_monitor`).
     db_path: PathBuf,
     caught_up: Arc<AtomicBool>,
     position: Arc<AtomicU64>,
@@ -784,113 +785,5 @@ impl Coordinator {
 
         tracing::info!("Coordinator: '{}' handed off leadership", name);
         Ok(true)
-    }
-
-    /// Promote a database from Follower to Leader.
-    ///
-    /// Used by HaNode for engine-level HA: when the engine acquires its lease,
-    /// all databases are promoted at once. This restarts WAL sync as Leader
-    /// without going through the full join() flow (which would re-pull from storage).
-    ///
-    /// The caller (HaNode) is responsible for catching up follower data before
-    /// calling promote — this method does NOT call catchup_on_promotion.
-    pub async fn promote(&self, name: &str) -> Result<bool> {
-        let databases = self.databases.read().await;
-        let entry = match databases.get(name) {
-            Some(e) => e,
-            None => return Ok(false),
-        };
-
-        if entry.role.load() == Role::Leader {
-            return Ok(false); // already Leader
-        }
-
-        // Cancel any running follower task
-        let _ = entry.cancel_tx.send(true);
-
-        // Resume replication as leader, continuing from the existing S3 seq
-        // so followers can discover new changesets via discover_after().
-        tokio::time::timeout(
-            self.config.replicator_timeout,
-            self.replicator.add_continuing(name, &entry.db_path),
-        )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Coordinator: replicator.add_continuing('{}') timed out during promote after {:?}",
-                name,
-                self.config.replicator_timeout
-            )
-        })??;
-
-        entry.role.store(Role::Leader);
-        let _ = self.role_tx.send(RoleEvent::Promoted {
-            db_name: name.to_string(),
-        });
-
-        tracing::info!("Coordinator: '{}' promoted to Leader", name);
-        Ok(true)
-    }
-
-    /// Demote a database from Leader to Follower.
-    ///
-    /// Used by HaNode for engine-level HA: when the engine loses its lease,
-    /// all databases are demoted at once. This stops WAL sync and sets the role
-    /// to Follower without releasing any per-database lease (HaNode uses engine-level leases).
-    pub async fn demote(&self, name: &str) -> Result<bool> {
-        let databases = self.databases.read().await;
-        let entry = match databases.get(name) {
-            Some(e) => e,
-            None => return Ok(false),
-        };
-
-        if entry.role.load() == Role::Follower {
-            return Ok(false); // already Follower
-        }
-
-        // Cancel any running leader renewal task
-        let _ = entry.cancel_tx.send(true);
-
-        // Stop WAL sync (final sync before stopping)
-        if tokio::time::timeout(
-            self.config.replicator_timeout,
-            self.replicator.remove(name),
-        )
-        .await
-        .is_err()
-        {
-            tracing::error!(
-                "Coordinator: replicator.remove('{}') timed out during demote after {:?}",
-                name,
-                self.config.replicator_timeout
-            );
-        }
-
-        entry.role.store(Role::Follower);
-        let _ = self.role_tx.send(RoleEvent::Demoted {
-            db_name: name.to_string(),
-        });
-
-        tracing::info!("Coordinator: '{}' demoted to Follower", name);
-        Ok(true)
-    }
-
-    /// Get the stored db_path for a database (used by HaNode for promote/demote cycles).
-    pub async fn db_path(&self, name: &str) -> Option<PathBuf> {
-        self.databases
-            .read()
-            .await
-            .get(name)
-            .map(|e| e.db_path.clone())
-    }
-
-    /// Get all database names and their current roles.
-    pub async fn all_roles(&self) -> Vec<(String, Role)> {
-        self.databases
-            .read()
-            .await
-            .iter()
-            .map(|(name, entry)| (name.clone(), entry.role.load()))
-            .collect()
     }
 }

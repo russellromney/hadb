@@ -27,7 +27,6 @@
 pub mod client;
 pub mod coordinator;
 pub mod follower;
-pub mod ha_node;
 pub mod lease;
 pub mod manifest;
 pub mod metrics;
@@ -50,5 +49,4 @@ pub use node_registry::{node_key, nodes_prefix, InMemoryNodeRegistry, NodeRegist
 pub use follower::{FollowerBehavior, LeaseMonitorContext, run_leader_renewal, run_lease_monitor};
 pub use client::{HaClient, HaClientBuilder};
 pub use coordinator::{Coordinator, JoinResult};
-pub use ha_node::{HaNode, HaNodeConfig};
 pub use sharded_lease::ShardedLeaseStore;
