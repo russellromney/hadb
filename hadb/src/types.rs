@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use hadb_lease::LeaseStore;
+
 /// Database role in the HA cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -137,8 +139,16 @@ pub enum RoleEvent {
 }
 
 /// Configuration for CAS lease coordination.
-#[derive(Debug, Clone)]
+///
+/// Carries both the policy (timing, identity) and the storage backend
+/// that holds the lease key. The pairing is enforced at the type level
+/// — there's no way to construct a `LeaseConfig` without a `store`, so
+/// the Coordinator can rely on "leases configured" meaning "store +
+/// policy both present."
+#[derive(Clone)]
 pub struct LeaseConfig {
+    /// Storage backend that holds this database's lease key.
+    pub store: Arc<dyn LeaseStore>,
     /// Unique identifier for this instance (e.g. FLY_MACHINE_ID).
     pub instance_id: String,
     /// Network address for this instance (for client discovery).
@@ -159,8 +169,9 @@ pub struct LeaseConfig {
 }
 
 impl LeaseConfig {
-    pub fn new(instance_id: String, address: String) -> Self {
+    pub fn new(store: Arc<dyn LeaseStore>, instance_id: String, address: String) -> Self {
         Self {
+            store,
             instance_id,
             address,
             ttl_secs: 5,
@@ -169,6 +180,27 @@ impl LeaseConfig {
             required_expired_reads: 1,
             max_consecutive_renewal_errors: 3,
         }
+    }
+}
+
+// `dyn LeaseStore` doesn't carry Debug; print the policy fields and
+// elide the store. Coordinators print this in logs, so keeping a Debug
+// impl matters even though the field can't be displayed.
+impl std::fmt::Debug for LeaseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeaseConfig")
+            .field("instance_id", &self.instance_id)
+            .field("address", &self.address)
+            .field("ttl_secs", &self.ttl_secs)
+            .field("renew_interval", &self.renew_interval)
+            .field("follower_poll_interval", &self.follower_poll_interval)
+            .field("required_expired_reads", &self.required_expired_reads)
+            .field(
+                "max_consecutive_renewal_errors",
+                &self.max_consecutive_renewal_errors,
+            )
+            .field("store", &"<dyn LeaseStore>")
+            .finish()
     }
 }
 
@@ -309,9 +341,13 @@ mod tests {
         }
     }
 
+    fn test_store() -> Arc<dyn LeaseStore> {
+        Arc::new(crate::lease::InMemoryLeaseStore::new())
+    }
+
     #[test]
     fn test_lease_config_defaults() {
-        let config = LeaseConfig::new("instance-1".into(), "127.0.0.1:8080".into());
+        let config = LeaseConfig::new(test_store(), "instance-1".into(), "127.0.0.1:8080".into());
 
         assert_eq!(config.instance_id, "instance-1");
         assert_eq!(config.address, "127.0.0.1:8080");
@@ -324,7 +360,8 @@ mod tests {
 
     #[test]
     fn test_lease_config_custom() {
-        let mut config = LeaseConfig::new("instance-1".into(), "127.0.0.1:8080".into());
+        let mut config =
+            LeaseConfig::new(test_store(), "instance-1".into(), "127.0.0.1:8080".into());
         config.ttl_secs = 10;
         config.renew_interval = Duration::from_secs(5);
         config.follower_poll_interval = Duration::from_secs(2);
@@ -352,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_coordinator_config_with_lease() {
-        let lease = LeaseConfig::new("instance-1".into(), "127.0.0.1:8080".into());
+        let lease = LeaseConfig::new(test_store(), "instance-1".into(), "127.0.0.1:8080".into());
         let mut config = CoordinatorConfig::default();
         config.lease = Some(lease);
 

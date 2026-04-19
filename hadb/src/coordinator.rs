@@ -21,7 +21,7 @@ use crate::lease::DbLease;
 use crate::metrics::HaMetrics;
 use crate::node_registry::{NodeRegistration, NodeRegistry};
 use crate::manifest::ManifestStore;
-use crate::traits::{LeaseStore, Replicator};
+use crate::traits::Replicator;
 use crate::types::{CoordinatorConfig, Role, RoleEvent};
 
 /// Resolve the effective lease key for a database.
@@ -81,7 +81,6 @@ struct DbEntry {
 /// any database and any storage backend. All dependencies are trait objects.
 pub struct Coordinator {
     replicator: Arc<dyn Replicator>,
-    lease_store: Option<Arc<dyn LeaseStore>>,
     manifest_store: Option<Arc<dyn ManifestStore>>,
     node_registry: Option<Arc<dyn NodeRegistry>>,
     follower_behavior: Arc<dyn FollowerBehavior>,
@@ -96,15 +95,14 @@ impl Coordinator {
     /// Create a new Coordinator.
     ///
     /// `replicator` handles replication (snapshot + incremental updates).
-    /// `lease_store` is for CAS lease operations (None = no HA, always Leader).
     /// `manifest_store` is for manifest polling and publishing (None = no manifest).
     /// `node_registry` is for read replica discovery (None = no registry).
     /// `follower_behavior` defines database-specific follower pull and promotion logic.
     /// `prefix` is the storage key prefix for all databases (e.g. "wal/" or "ha/").
-    /// `config` is the coordinator configuration.
+    /// `config` is the coordinator configuration. The lease store is part of
+    /// `config.lease` (`Option<LeaseConfig>`) — `None` = no HA, always Leader.
     pub fn new(
         replicator: Arc<dyn Replicator>,
-        lease_store: Option<Arc<dyn LeaseStore>>,
         manifest_store: Option<Arc<dyn ManifestStore>>,
         node_registry: Option<Arc<dyn NodeRegistry>>,
         follower_behavior: Arc<dyn FollowerBehavior>,
@@ -115,7 +113,6 @@ impl Coordinator {
 
         Arc::new(Self {
             replicator,
-            lease_store,
             manifest_store,
             node_registry,
             follower_behavior,
@@ -132,8 +129,8 @@ impl Coordinator {
     /// If leases are enabled: claims the lease -> Leader, or follows -> Follower.
     /// If leases are disabled: starts leader sync -> always Leader.
     pub async fn join(self: &Arc<Self>, name: &str, db_path: &Path) -> Result<JoinResult> {
-        let lease_store = match &self.lease_store {
-            Some(ls) => ls.clone(),
+        let lease_config = match &self.config.lease {
+            Some(c) => c,
             None => {
                 // No HA — always leader.
                 tokio::time::timeout(
@@ -175,15 +172,9 @@ impl Coordinator {
         };
 
         // HA mode: try to claim lease.
-        let lease_config = self
-            .config
-            .lease
-            .as_ref()
-            .expect("lease config must be present when lease_store is Some");
-
         let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
         let mut lease = DbLease::new(
-            lease_store,
+            lease_config.store.clone(),
             &lease_key,
             &lease_config.instance_id,
             &lease_config.address,
@@ -207,7 +198,7 @@ impl Coordinator {
             lease_config.address.clone()
         } else {
             match DbLease::new(
-                self.lease_store.as_ref().unwrap().clone(),
+                lease_config.store.clone(),
                 &lease_key,
                 &lease_config.instance_id,
                 &lease_config.address,
@@ -527,43 +518,41 @@ impl Coordinator {
                     );
                 }
 
-                if let Some(ls) = &self.lease_store {
-                    if let Some(lease_config) = &self.config.lease {
-                        let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
-                        let lease = DbLease::new(
-                            ls.clone(),
-                            &lease_key,
-                            &lease_config.instance_id,
-                            &lease_config.address,
-                            lease_config.ttl_secs,
-                        );
-                        match lease.read().await {
-                            Ok(Some((data, _)))
-                                if data.instance_id == lease_config.instance_id =>
-                            {
-                                if let Err(e) = ls.delete(lease.lease_key()).await {
-                                    tracing::error!(
-                                        "Coordinator: failed to release lease for '{}': {}",
-                                        name,
-                                        e
-                                    );
-                                }
-                            }
-                            Ok(Some((data, _))) => {
-                                tracing::info!(
-                                    "Coordinator: lease for '{}' held by {} (not us), skipping release",
-                                    name,
-                                    data.instance_id
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
+                if let Some(lease_config) = &self.config.lease {
+                    let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
+                    let lease = DbLease::new(
+                        lease_config.store.clone(),
+                        &lease_key,
+                        &lease_config.instance_id,
+                        &lease_config.address,
+                        lease_config.ttl_secs,
+                    );
+                    match lease.read().await {
+                        Ok(Some((data, _)))
+                            if data.instance_id == lease_config.instance_id =>
+                        {
+                            if let Err(e) = lease_config.store.delete(lease.lease_key()).await {
                                 tracing::error!(
-                                    "Coordinator: failed to read lease for '{}' during leave: {}",
+                                    "Coordinator: failed to release lease for '{}': {}",
                                     name,
                                     e
                                 );
                             }
+                        }
+                        Ok(Some((data, _))) => {
+                            tracing::info!(
+                                "Coordinator: lease for '{}' held by {} (not us), skipping release",
+                                name,
+                                data.instance_id
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::error!(
+                                "Coordinator: failed to read lease for '{}' during leave: {}",
+                                name,
+                                e
+                            );
                         }
                     }
                 }
@@ -647,22 +636,17 @@ impl Coordinator {
 
         let all = registry.discover_all(&self.prefix, name).await?;
 
-        let current_session_id = match &self.lease_store {
-            Some(ls) => {
-                let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
-                let lease = DbLease::new(
-                    ls.clone(),
-                    &lease_key,
-                    &lease_config.instance_id,
-                    &lease_config.address,
-                    lease_config.ttl_secs,
-                );
-                match lease.read().await {
-                    Ok(Some((data, _))) => data.session_id,
-                    _ => return Ok(Vec::new()),
-                }
-            }
-            None => return Ok(Vec::new()),
+        let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
+        let lease = DbLease::new(
+            lease_config.store.clone(),
+            &lease_key,
+            &lease_config.instance_id,
+            &lease_config.address,
+            lease_config.ttl_secs,
+        );
+        let current_session_id = match lease.read().await {
+            Ok(Some((data, _))) => data.session_id,
+            _ => return Ok(Vec::new()),
         };
 
         Ok(all
@@ -751,30 +735,28 @@ impl Coordinator {
             );
         }
 
-        if let Some(ls) = &self.lease_store {
-            if let Some(lease_config) = &self.config.lease {
-                let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
-                let lease = DbLease::new(
-                    ls.clone(),
-                    &lease_key,
-                    &lease_config.instance_id,
-                    &lease_config.address,
-                    lease_config.ttl_secs,
-                );
-                match lease.read().await {
-                    Ok(Some((data, _)))
-                        if data.instance_id == lease_config.instance_id =>
-                    {
-                        if let Err(e) = ls.delete(lease.lease_key()).await {
-                            tracing::error!(
-                                "Coordinator: failed to release lease during handoff for '{}': {}",
-                                name,
-                                e
-                            );
-                        }
+        if let Some(lease_config) = &self.config.lease {
+            let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
+            let lease = DbLease::new(
+                lease_config.store.clone(),
+                &lease_key,
+                &lease_config.instance_id,
+                &lease_config.address,
+                lease_config.ttl_secs,
+            );
+            match lease.read().await {
+                Ok(Some((data, _)))
+                    if data.instance_id == lease_config.instance_id =>
+                {
+                    if let Err(e) = lease_config.store.delete(lease.lease_key()).await {
+                        tracing::error!(
+                            "Coordinator: failed to release lease during handoff for '{}': {}",
+                            name,
+                            e
+                        );
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 

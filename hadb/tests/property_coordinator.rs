@@ -23,6 +23,7 @@ proptest! {
 
                 for node_idx in 0..num_nodes {
                     let lease_config = LeaseConfig::new(
+                        store.clone(),
                         instance_ids[node_idx].clone(),
                         format!("127.0.0.1:{}", 8000 + node_idx),
                     );

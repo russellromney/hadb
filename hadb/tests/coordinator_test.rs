@@ -108,16 +108,15 @@ impl FollowerBehavior for MockFollowerBehavior {
     }
 }
 
-// Helper to create a test coordinator
+// Helper to create a test coordinator. The lease store (if any) lives in
+// `config.lease.as_ref().map(|c| c.store)` after Phase Fjord.
 fn test_coordinator(
-    lease_store: Option<Arc<dyn LeaseStore>>,
     config: CoordinatorConfig,
 ) -> (Arc<Coordinator>, MockReplicator) {
     let replicator = MockReplicator::new();
 
     let coordinator = Coordinator::new(
         Arc::new(replicator.clone()),
-        lease_store,
         None,
         None,
         Arc::new(MockFollowerBehavior),
@@ -135,7 +134,7 @@ fn test_coordinator(
 #[tokio::test]
 async fn test_single_node_join_as_leader() {
     let config = CoordinatorConfig::default();
-    let (coordinator, replicator) = test_coordinator(None, config);
+    let (coordinator, replicator) = test_coordinator(config);
 
     let db_path = PathBuf::from("/tmp/test.db");
     let result = coordinator.join("testdb", &db_path).await.unwrap();
@@ -152,7 +151,7 @@ async fn test_single_node_join_as_leader() {
 #[tokio::test]
 async fn test_single_node_leave() {
     let config = CoordinatorConfig::default();
-    let (coordinator, replicator) = test_coordinator(None, config);
+    let (coordinator, replicator) = test_coordinator(config);
 
     let db_path = PathBuf::from("/tmp/test.db");
     coordinator.join("testdb", &db_path).await.unwrap();
@@ -169,7 +168,7 @@ async fn test_single_node_leave() {
 #[tokio::test]
 async fn test_single_node_database_count() {
     let config = CoordinatorConfig::default();
-    let (coordinator, _) = test_coordinator(None, config);
+    let (coordinator, _) = test_coordinator(config);
 
     assert_eq!(coordinator.database_count().await, 0);
 
@@ -193,11 +192,12 @@ async fn test_ha_join_as_leader() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let mut config = CoordinatorConfig::default();
     config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
 
-    let (coordinator, replicator) = test_coordinator(Some(lease_store), config);
+    let (coordinator, replicator) = test_coordinator(config);
 
     let db_path = PathBuf::from("/tmp/test.db");
     let result = coordinator.join("testdb", &db_path).await.unwrap();
@@ -218,11 +218,12 @@ async fn test_ha_leader_metrics() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let mut config = CoordinatorConfig::default();
     config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
 
-    let (coordinator, _) = test_coordinator(Some(lease_store), config);
+    let (coordinator, _) = test_coordinator(config);
 
     let db_path = PathBuf::from("/tmp/test.db");
     coordinator.join("testdb", &db_path).await.unwrap();
@@ -240,11 +241,12 @@ async fn test_ha_leader_handoff() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let mut config = CoordinatorConfig::default();
     config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
 
-    let (coordinator, replicator) = test_coordinator(Some(lease_store), config);
+    let (coordinator, replicator) = test_coordinator(config);
 
     let db_path = PathBuf::from("/tmp/test.db");
     coordinator.join("testdb", &db_path).await.unwrap();
@@ -263,11 +265,12 @@ async fn test_ha_handoff_not_leader() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let mut config = CoordinatorConfig::default();
     config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
 
-    let (coordinator, _) = test_coordinator(Some(lease_store), config);
+    let (coordinator, _) = test_coordinator(config);
 
     let result = coordinator.handoff("nonexistent").await.unwrap();
     assert!(!result);
@@ -282,21 +285,23 @@ async fn test_ha_join_as_follower() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let mut config1 = CoordinatorConfig::default();
     config1.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
 
-    let (coordinator1, _) = test_coordinator(Some(lease_store.clone()), config1);
+    let (coordinator1, _) = test_coordinator(config1);
     let db_path = PathBuf::from("/tmp/test.db");
     coordinator1.join("testdb", &db_path).await.unwrap();
 
     let mut config2 = CoordinatorConfig::default();
     config2.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-2".into(),
         "127.0.0.1:8081".into(),
     ));
 
-    let (coordinator2, replicator2) = test_coordinator(Some(lease_store), config2);
+    let (coordinator2, replicator2) = test_coordinator(config2);
     let result2 = coordinator2.join("testdb", &db_path).await.unwrap();
 
     assert_eq!(result2.role, Role::Follower);
@@ -314,21 +319,23 @@ async fn test_ha_follower_metrics() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let mut config1 = CoordinatorConfig::default();
     config1.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
 
-    let (coordinator1, _) = test_coordinator(Some(lease_store.clone()), config1);
+    let (coordinator1, _) = test_coordinator(config1);
     let db_path = PathBuf::from("/tmp/test.db");
     coordinator1.join("testdb", &db_path).await.unwrap();
 
     let mut config2 = CoordinatorConfig::default();
     config2.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-2".into(),
         "127.0.0.1:8081".into(),
     ));
 
-    let (coordinator2, _) = test_coordinator(Some(lease_store), config2);
+    let (coordinator2, _) = test_coordinator(config2);
     coordinator2.join("testdb", &db_path).await.unwrap();
 
     let metrics = coordinator2.metrics();
@@ -348,11 +355,12 @@ async fn test_role_events_join_leader() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let mut config = CoordinatorConfig::default();
     config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
 
-    let (coordinator, _) = test_coordinator(Some(lease_store), config);
+    let (coordinator, _) = test_coordinator(config);
     let mut events_rx = coordinator.role_events();
 
     let db_path = PathBuf::from("/tmp/test.db");
@@ -373,11 +381,12 @@ async fn test_role_events_handoff() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let mut config = CoordinatorConfig::default();
     config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
 
-    let (coordinator, _) = test_coordinator(Some(lease_store), config);
+    let (coordinator, _) = test_coordinator(config);
     let mut events_rx = coordinator.role_events();
 
     let db_path = PathBuf::from("/tmp/test.db");
@@ -403,7 +412,7 @@ async fn test_role_events_handoff() {
 #[tokio::test]
 async fn test_replicator_add_failure() {
     let config = CoordinatorConfig::default();
-    let (coordinator, replicator) = test_coordinator(None, config);
+    let (coordinator, replicator) = test_coordinator(config);
 
     replicator.set_fail(true);
 
@@ -417,7 +426,7 @@ async fn test_replicator_add_failure() {
 #[tokio::test]
 async fn test_leave_nonexistent_database() {
     let config = CoordinatorConfig::default();
-    let (coordinator, _) = test_coordinator(None, config);
+    let (coordinator, _) = test_coordinator(config);
 
     coordinator.leave("nonexistent").await.unwrap();
 }
@@ -425,7 +434,7 @@ async fn test_leave_nonexistent_database() {
 #[tokio::test]
 async fn test_concurrent_joins() {
     let config = CoordinatorConfig::default();
-    let (coordinator, _) = test_coordinator(None, config);
+    let (coordinator, _) = test_coordinator(config);
 
     let db_path = PathBuf::from("/tmp/test.db");
 
@@ -448,7 +457,7 @@ async fn test_concurrent_joins() {
 #[tokio::test]
 async fn test_discover_replicas_no_registry() {
     let config = CoordinatorConfig::default();
-    let (coordinator, _) = test_coordinator(None, config);
+    let (coordinator, _) = test_coordinator(config);
 
     let replicas = coordinator.discover_replicas("testdb").await.unwrap();
     assert!(replicas.is_empty());
@@ -461,7 +470,7 @@ async fn test_discover_replicas_no_registry() {
 #[tokio::test]
 async fn test_database_names_empty() {
     let config = CoordinatorConfig::default();
-    let (coordinator, _) = test_coordinator(None, config);
+    let (coordinator, _) = test_coordinator(config);
 
     let names = coordinator.database_names().await;
     assert!(names.is_empty());
@@ -470,7 +479,7 @@ async fn test_database_names_empty() {
 #[tokio::test]
 async fn test_database_names_multiple() {
     let config = CoordinatorConfig::default();
-    let (coordinator, _) = test_coordinator(None, config);
+    let (coordinator, _) = test_coordinator(config);
 
     let db_path = PathBuf::from("/tmp/test.db");
     coordinator.join("db_alpha", &db_path).await.unwrap();
@@ -485,7 +494,7 @@ async fn test_database_names_multiple() {
 #[tokio::test]
 async fn test_drain_all_empty() {
     let config = CoordinatorConfig::default();
-    let (coordinator, _) = test_coordinator(None, config);
+    let (coordinator, _) = test_coordinator(config);
 
     let drained = coordinator.drain_all().await;
     assert_eq!(drained, 0);
@@ -495,7 +504,7 @@ async fn test_drain_all_empty() {
 #[tokio::test]
 async fn test_drain_all_leaders() {
     let config = CoordinatorConfig::default();
-    let (coordinator, replicator) = test_coordinator(None, config);
+    let (coordinator, replicator) = test_coordinator(config);
 
     let db_path = PathBuf::from("/tmp/test.db");
     coordinator.join("db1", &db_path).await.unwrap();
@@ -520,11 +529,12 @@ async fn test_drain_all_with_ha() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let mut config = CoordinatorConfig::default();
     config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
 
-    let (coordinator, _) = test_coordinator(Some(lease_store), config);
+    let (coordinator, _) = test_coordinator(config);
 
     let db_path = PathBuf::from("/tmp/test.db");
     coordinator.join("ha_db1", &db_path).await.unwrap();
@@ -543,7 +553,7 @@ async fn test_drain_all_with_ha() {
 
 #[tokio::test]
 async fn test_manifest_store_accessor_none() {
-    let (coordinator, _) = test_coordinator(None, CoordinatorConfig::default());
+    let (coordinator, _) = test_coordinator(CoordinatorConfig::default());
     assert!(coordinator.manifest_store().is_none());
 }
 
@@ -554,7 +564,6 @@ async fn test_manifest_store_accessor_some() {
 
     let coordinator = Coordinator::new(
         Arc::new(replicator),
-        None,
         Some(manifest_store),
         None,
         Arc::new(MockFollowerBehavior),
@@ -585,7 +594,6 @@ async fn test_coordinator_with_manifest_store_joins_as_leader() {
 
     let coordinator = Coordinator::new(
         Arc::new(replicator),
-        None,
         Some(manifest_store),
         None,
         Arc::new(MockFollowerBehavior),
@@ -638,6 +646,7 @@ async fn test_manifest_polling_emits_event_on_version_change() {
     let mut config = CoordinatorConfig::default();
     config.manifest_poll_interval = Duration::from_millis(50);
     config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
@@ -645,7 +654,6 @@ async fn test_manifest_polling_emits_event_on_version_change() {
     let replicator = MockReplicator::new();
     let coordinator = Coordinator::new(
         Arc::new(replicator),
-        Some(lease_store),
         Some(manifest_store.clone() as Arc<dyn ManifestStore>),
         None,
         Arc::new(MockFollowerBehavior),
@@ -768,6 +776,7 @@ async fn test_manifest_polling_no_event_when_version_unchanged() {
     let mut config = CoordinatorConfig::default();
     config.manifest_poll_interval = Duration::from_millis(50);
     config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
         "instance-1".into(),
         "127.0.0.1:8080".into(),
     ));
@@ -775,7 +784,6 @@ async fn test_manifest_polling_no_event_when_version_unchanged() {
     let replicator = MockReplicator::new();
     let coordinator = Coordinator::new(
         Arc::new(replicator),
-        Some(lease_store),
         Some(manifest_store as Arc<dyn ManifestStore>),
         None,
         Arc::new(MockFollowerBehavior),
