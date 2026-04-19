@@ -8,7 +8,7 @@
 //! does network I/O.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
@@ -53,16 +53,15 @@ pub struct JoinResult {
 }
 
 /// Per-database entry in the coordinator.
+///
+/// The shared `caught_up` / `position` atomics that haqlite reads come back
+/// to the caller via `JoinResult` — DbEntry only needs the bookkeeping it
+/// uses internally (role, address, cancel handle, task handle).
 struct DbEntry {
     role: Arc<AtomicRole>,
     leader_address: Arc<RwLock<String>>,
     cancel_tx: watch::Sender<bool>,
     task_handle: JoinHandle<()>,
-    /// Path to the database file. Stored for follower → leader catch-up
-    /// inside the lease monitor task (see `follower::run_lease_monitor`).
-    db_path: PathBuf,
-    caught_up: Arc<AtomicBool>,
-    position: Arc<AtomicU64>,
 }
 
 /// HA coordinator.
@@ -147,9 +146,6 @@ impl Coordinator {
                         leader_address: Arc::new(RwLock::new(String::new())),
                         cancel_tx,
                         task_handle: tokio::spawn(async {}),
-                        db_path: db_path.to_path_buf(),
-                        caught_up: caught_up.clone(),
-                        position: position.clone(),
                     },
                 );
                 let _ = self.role_tx.send(RoleEvent::Joined {
@@ -266,9 +262,6 @@ impl Coordinator {
                         leader_address: leader_addr,
                         cancel_tx,
                         task_handle,
-                        db_path: db_path.to_path_buf(),
-                        caught_up: leader_caught_up.clone(),
-                        position: leader_position.clone(),
                     },
                 );
 
@@ -353,9 +346,6 @@ impl Coordinator {
                         leader_address: addr_for_entry,
                         cancel_tx,
                         task_handle,
-                        db_path: db_path.to_path_buf(),
-                        caught_up: follower_caught_up.clone(),
-                        position: follower_position.clone(),
                     },
                 );
 
