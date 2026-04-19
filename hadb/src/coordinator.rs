@@ -605,6 +605,12 @@ impl Coordinator {
         self.manifest_store.as_ref()
     }
 
+    /// Get the lease config, if configured. Useful for reading back timing
+    /// policy after a `Coordinator` is constructed (tests and diagnostics).
+    pub fn lease_config(&self) -> Option<&crate::LeaseConfig> {
+        self.config.lease.as_ref()
+    }
+
     /// Discover registered replicas for a database.
     pub async fn discover_replicas(&self, name: &str) -> Result<Vec<NodeRegistration>> {
         let registry = match &self.node_registry {
