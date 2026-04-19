@@ -63,7 +63,7 @@ Same replication and leader election in both modes. The difference is whether th
 
 hadb is a workspace of crates:
 
-- **hadb** -- Core coordination. Leader election via `LeaseStore` trait, role management, follower readiness (`JoinResult` with `caught_up` + `position`), `ShardedLeaseStore` for horizontal scaling. Zero cloud dependencies.
+- **hadb** -- Core coordination. Leader election via `LeaseStore` trait, role management, follower readiness (`JoinResult` with `caught_up` + `position`). Zero cloud dependencies.
 - **hadb-io** -- Shared IO infrastructure. `ObjectStore` trait, S3 client, retry with circuit breaker, concurrent uploads, HMAC-signed webhooks, GFS retention.
 - **hadb-lease-s3** -- S3 leader election via conditional PUTs (ETags). CAS for compare-and-swap.
 - **hadb-lease-nats** -- NATS JetStream KV leader election. 2-5ms operations (vs S3's 50-200ms). Zero per-request cost.
@@ -113,7 +113,7 @@ Shared infrastructure (S3 client, retry/circuit breaker, concurrent uploads, web
 All crates published to [crates.io](https://crates.io/crates/hadb).
 
 **Core (hadb workspace):**
-- [**hadb**](https://github.com/russellromney/hadb/tree/main/hadb) -- Coordination framework. Leader election, role management, follower readiness, ShardedLeaseStore. Stable.
+- [**hadb**](https://github.com/russellromney/hadb/tree/main/hadb) -- Coordination framework. Leader election, role management, follower readiness. Stable.
 - [**hadb-io**](https://github.com/russellromney/hadb/tree/main/hadb-io) -- Shared infrastructure. ObjectStore trait, S3 client, retry/circuit breaker, concurrent uploads, webhooks, GFS retention. Stable.
 - [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) -- S3 lease store via conditional PUTs. Works on AWS S3. **Not compatible with Tigris** (conditional PUTs are not atomic for concurrent requests).
 - [**hadb-lease-nats**](https://github.com/russellromney/hadb/tree/main/hadb-lease-nats) -- NATS JetStream KV lease store. 20-50x faster than S3. Tested against real NATS.
