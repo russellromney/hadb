@@ -171,6 +171,59 @@ mod tests {
         assert!(back.sleeping);
     }
 
+    /// Cross-language interop: a fixture string representing exactly
+    /// what cinchfs-go (`cinchfs-go/auth_test.go::cinchfsLeaseDataInteropFixture`)
+    /// emits must deserialize here into a `LeaseData` with matching
+    /// field values. This is the contract: any hadb-driven writer in
+    /// any language serializes this shape, every Rust reader decodes
+    /// it. If the Go side drifts (renames a json tag, changes a type),
+    /// this test fails; if this test drifts, the Go side's matching
+    /// test fails. Either failure points at which side moved.
+    ///
+    /// The fixture string MUST be kept byte-identical to cinchfs-go's.
+    #[test]
+    fn lease_data_interop_fixture_from_cinchfs_go() {
+        const CINCHFS_GO_INTEROP_FIXTURE: &str = r#"{"instance_id":"iid-interop","address":"cinchfs://host","claimed_at":1700000000,"ttl_secs":30,"session_id":"sid-interop","sleeping":false}"#;
+
+        let lease: LeaseData =
+            serde_json::from_str(CINCHFS_GO_INTEROP_FIXTURE).expect("deserialize cinchfs fixture");
+
+        assert_eq!(lease.instance_id, "iid-interop");
+        assert_eq!(lease.address, "cinchfs://host");
+        assert_eq!(lease.claimed_at, 1_700_000_000);
+        assert_eq!(lease.ttl_secs, 30);
+        assert_eq!(lease.session_id, "sid-interop");
+        assert!(!lease.sleeping);
+
+        // And Rust's serializer should produce the same byte shape
+        // Go's does (stable key order: struct-declaration order).
+        // If this ever fails, check whether anyone added serde
+        // attributes that change emission order.
+        let reemitted = serde_json::to_string(&lease).expect("serialize");
+        assert_eq!(
+            reemitted, CINCHFS_GO_INTEROP_FIXTURE,
+            "Rust re-emitted JSON drifted from the cinchfs-go interop fixture.\n\
+             Either cinchfs-go needs updating, or serde attributes on LeaseData changed."
+        );
+    }
+
+    /// Tolerate the hadb-historical legacy shape where callers used
+    /// to omit the optional fields (they're `#[serde(default)]`).
+    /// Guards against accidentally breaking an older on-the-wire
+    /// payload a long-running lease holder might have written before
+    /// an upgrade.
+    #[test]
+    fn lease_data_deserializes_with_missing_defaults() {
+        let minimal =
+            r#"{"instance_id":"i","claimed_at":100,"ttl_secs":5}"#;
+        let lease: LeaseData =
+            serde_json::from_str(minimal).expect("missing-defaults should deserialize");
+        assert_eq!(lease.instance_id, "i");
+        assert_eq!(lease.address, "");
+        assert_eq!(lease.session_id, "");
+        assert!(!lease.sleeping);
+    }
+
     #[allow(dead_code)]
     fn _object_safe(_: &dyn LeaseStore) {}
 
