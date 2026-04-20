@@ -202,6 +202,35 @@ impl CinchHttpStorage {
     fn is_transient_status(status: StatusCode) -> bool {
         status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
     }
+
+    /// A 412 on an unconditional write (`put` / `delete` / `delete_many`)
+    /// can only mean the server's fence revision has advanced past the
+    /// one we sent. In cinch's design, that revision lives in NATS-KV
+    /// and advances on every lease renewal (default every 2s). Our
+    /// local `AtomicU64` fence is updated *after* the renewal's HTTP
+    /// response returns to `DbLease::renew` and it calls
+    /// `update_fence_token()` — a ~ms window where the local atomic
+    /// is stale but NATS-KV has advanced. A concurrent turbolite
+    /// page write inside that window sends the stale fence, grabby
+    /// returns 412, turbolite surfaces it as SQLite `disk I/O error`,
+    /// and `migrate()` during provision blows up.
+    ///
+    /// So for unconditional writes, treat 412 as transient: the loop
+    /// rebuilds the request via `apply_fence`, which re-reads the
+    /// atomic and picks up the new fence. Usually one retry is
+    /// enough; the `max_retries` ceiling prevents infinite loops if
+    /// we genuinely lost the lease (another writer took over — in
+    /// which case the renewal path will detect CAS-conflict and
+    /// demote, clearing the atomic and making the next write fail
+    /// explicitly via `apply_fence`).
+    ///
+    /// CAS writes (`put_if_absent` / `put_if_match`) intentionally
+    /// treat 412 as non-transient — those have `If-None-Match` /
+    /// `If-Match` headers whose 412s are real CAS conflicts the
+    /// caller must surface.
+    fn is_fence_stale_retryable(status: StatusCode) -> bool {
+        status == StatusCode::PRECONDITION_FAILED
+    }
 }
 
 #[async_trait]
@@ -270,7 +299,10 @@ impl StorageBackend for CinchHttpStorage {
                     self.put_bytes.fetch_add(len, Ordering::Relaxed);
                     return Ok(());
                 }
-                Ok(r) if Self::is_transient_status(r.status()) => {
+                Ok(r)
+                    if Self::is_transient_status(r.status())
+                        || Self::is_fence_stale_retryable(r.status()) =>
+                {
                     attempt += 1;
                     if attempt >= self.max_retries {
                         return Err(anyhow!(
@@ -312,7 +344,10 @@ impl StorageBackend for CinchHttpStorage {
                 {
                     return Ok(());
                 }
-                Ok(r) if Self::is_transient_status(r.status()) => {
+                Ok(r)
+                    if Self::is_transient_status(r.status())
+                        || Self::is_fence_stale_retryable(r.status()) =>
+                {
                     attempt += 1;
                     if attempt >= self.max_retries {
                         return Err(anyhow!(
@@ -618,16 +653,44 @@ impl StorageBackend for CinchHttpStorage {
         let url = self.batch_delete_url();
         let mut total = 0usize;
         for chunk in keys.chunks(1000) {
-            let req = self
-                .client
-                .post(&url)
-                .bearer_auth(&self.token)
-                .json(&serde_json::json!({ "keys": chunk }));
-            let req = self.apply_fence(req)?;
-            let resp = req
-                .send()
-                .await
-                .with_context(|| format!("batch-DELETE {url} transport failed"))?;
+            // Fence-stale retry (see is_fence_stale_retryable). Same
+            // race as `put` / `delete`: the renewal-loop updates the
+            // server's NATS-KV revision a few ms before our local
+            // atomic picks it up.
+            let mut attempt = 0u32;
+            let resp = loop {
+                let req = self
+                    .client
+                    .post(&url)
+                    .bearer_auth(&self.token)
+                    .json(&serde_json::json!({ "keys": chunk }));
+                let req = self.apply_fence(req)?;
+                match req.send().await {
+                    Ok(r)
+                        if Self::is_transient_status(r.status())
+                            || Self::is_fence_stale_retryable(r.status()) =>
+                    {
+                        attempt += 1;
+                        if attempt >= self.max_retries {
+                            return Err(anyhow!(
+                                "batch-DELETE {url} returned {} after {attempt} attempts",
+                                r.status()
+                            ));
+                        }
+                        self.backoff(attempt).await;
+                    }
+                    Ok(r) => break r,
+                    Err(e) => {
+                        attempt += 1;
+                        if attempt >= self.max_retries {
+                            return Err(anyhow!(
+                                "batch-DELETE {url} transport failed after {attempt} attempts: {e}"
+                            ));
+                        }
+                        self.backoff(attempt).await;
+                    }
+                }
+            };
             if !resp.status().is_success() {
                 let s = resp.status();
                 let body = resp.text().await.unwrap_or_default();

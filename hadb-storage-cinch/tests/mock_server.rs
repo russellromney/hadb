@@ -476,6 +476,42 @@ async fn write_with_stale_fence_server_rejects_412() {
 }
 
 #[tokio::test]
+async fn write_retries_on_412_when_fence_advances() {
+    // Regression: Phase Shoal v2's renewal loop advances the server's
+    // NATS-KV revision a few ms before our local AtomicFence picks up
+    // the new value. A turbolite page write in that window sends the
+    // stale fence, server returns 412, and pre-fix turbolite surfaced
+    // the error as SQLite "disk I/O error" during migrate — breaking
+    // provisioning on strict e2e runs.
+    //
+    // This test simulates the race: server requires fence=10, writer
+    // starts at fence=7 (stale), and a background task bumps the
+    // writer to fence=10 after a short delay. The put should succeed
+    // on retry, not fail.
+    let state = MockState::new("tok");
+    *state.required_fence.lock().await = Some(10);
+    let (url, _h) = start_mock(state).await;
+
+    let (fence, writer) = AtomicFence::new();
+    writer.set(7);
+    let s = store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
+
+    // Bump the fence to the server's required value after the first
+    // request has had time to fail. The put retry-loop's backoff
+    // (10ms * 2^attempt) will cover this. AtomicFenceWriter is not
+    // Clone by design (single-owner semantic), so we move it into
+    // the task.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        writer.set(10);
+    });
+
+    // Should succeed after retrying with the updated fence.
+    s.put("race", b"v").await.expect("put should retry past 412");
+    assert_eq!(s.get("race").await.unwrap().unwrap(), b"v");
+}
+
+#[tokio::test]
 async fn write_refuses_when_fence_unset() {
     let state = MockState::new("tok");
     let (url, _h) = start_mock(state).await;
