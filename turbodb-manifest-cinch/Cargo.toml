@@ -15,12 +15,12 @@ hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12" }
+rmp-serde = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 axum = "0.8"
 uuid = { version = "1", features = ["v4"] }
-rmp-serde = { workspace = true }
+serde_json = { workspace = true }
