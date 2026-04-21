@@ -1,33 +1,43 @@
 //! CinchManifestStore: ManifestStore implementation over Cinch's HTTP sync API.
 //!
-//! HTTP API contract:
+//! Wire contract (msgpack):
 //! ```text
-//!   GET  /v1/sync/manifest?key=...  -> 200 { manifest: Manifest } or 404
-//!   POST /v1/sync/manifest?key=...  -> 201 { etag: "..." } or 409 (conflict)
-//!                                      Body: { manifest: Manifest, expected_version: u64|null }
-//!   HEAD /v1/sync/manifest?key=...  -> 200 with X-Manifest-Version, X-Writer-Id headers
-//!                                      or 404
+//!   GET  /v1/sync/manifest?key=...
+//!       → 200 Content-Type: application/msgpack  body = rmp_serde(Manifest)
+//!       → 404 (no manifest)
+//!
+//!   POST /v1/sync/manifest?key=...
+//!       Content-Type: application/msgpack  body = rmp_serde(Manifest)
+//!       Optional header `If-Match: <expected_version>`
+//!           (absent = create; numeric = CAS against the server-side
+//!           manifest's version field)
+//!       → 201/200 Content-Type: application/msgpack  body = rmp_serde({ etag })
+//!       → 409 (CAS mismatch or already exists)
+//!
+//!   HEAD /v1/sync/manifest?key=...
+//!       → 200 with `X-Manifest-Version` + `X-Writer-Id` headers
+//!       → 404 (no manifest)
 //! ```
 //!
-//! The manifest key is passed as a query param. The Bearer token scopes
-//! access to the database.
+//! The manifest key is a query param. The Bearer token scopes access to
+//! the database.
+//!
+//! Phase Turbogenesis-b: switched from JSON to msgpack. The
+//! pre-Turbogenesis-b client wrapped the manifest in
+//! `{ manifest, expected_version }` and sent JSON — which also happened
+//! to be incompatible with grabby's /v1/sync/manifest server (it used
+//! an If-Match header but the client never set one). The whole path
+//! was effectively vestigial. Now both sides speak the same msgpack
+//! wire.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hadb_storage::CasResult;
-use serde::{Deserialize, Serialize};
+use reqwest::header::{CONTENT_TYPE, IF_MATCH};
+use serde::Deserialize;
 use turbodb::{Manifest, ManifestMeta, ManifestStore};
 
-#[derive(Debug, Deserialize)]
-struct ManifestGetResponse {
-    manifest: Manifest,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct ManifestPutRequest {
-    manifest: Manifest,
-    expected_version: Option<u64>,
-}
+const CONTENT_TYPE_MSGPACK: &str = "application/msgpack";
 
 #[derive(Debug, Deserialize)]
 struct ManifestPutResponse {
@@ -101,17 +111,20 @@ impl ManifestStore for CinchManifestStore {
             .client
             .get(&self.manifest_url(key))
             .bearer_auth(&self.token)
+            .header(reqwest::header::ACCEPT, CONTENT_TYPE_MSGPACK)
             .send()
             .await
             .map_err(|e| anyhow!("HTTP manifest get failed: {}", e))?;
 
         match resp.status() {
             reqwest::StatusCode::OK => {
-                let body: ManifestGetResponse = resp
-                    .json()
+                let bytes = resp
+                    .bytes()
                     .await
-                    .map_err(|e| anyhow!("failed to parse manifest response: {}", e))?;
-                Ok(Some(body.manifest))
+                    .map_err(|e| anyhow!("read manifest response bytes: {}", e))?;
+                let manifest: Manifest = rmp_serde::from_slice(&bytes)
+                    .map_err(|e| anyhow!("decode msgpack manifest: {}", e))?;
+                Ok(Some(manifest))
             }
             reqwest::StatusCode::NOT_FOUND => Ok(None),
             status => {
@@ -127,26 +140,33 @@ impl ManifestStore for CinchManifestStore {
         manifest: &Manifest,
         expected_version: Option<u64>,
     ) -> Result<CasResult> {
-        let body = ManifestPutRequest {
-            manifest: manifest.clone(),
-            expected_version,
-        };
+        let body = rmp_serde::to_vec(manifest)
+            .map_err(|e| anyhow!("encode msgpack manifest: {}", e))?;
 
-        let resp = self
+        let mut req = self
             .client
             .post(&self.manifest_url(key))
             .bearer_auth(&self.token)
-            .json(&body)
+            .header(CONTENT_TYPE, CONTENT_TYPE_MSGPACK)
+            .body(body);
+
+        if let Some(v) = expected_version {
+            req = req.header(IF_MATCH, v.to_string());
+        }
+
+        let resp = req
             .send()
             .await
             .map_err(|e| anyhow!("HTTP manifest put failed: {}", e))?;
 
         match resp.status() {
             reqwest::StatusCode::CREATED | reqwest::StatusCode::OK => {
-                let body: ManifestPutResponse = resp
-                    .json()
+                let bytes = resp
+                    .bytes()
                     .await
-                    .map_err(|e| anyhow!("failed to parse manifest put response: {}", e))?;
+                    .map_err(|e| anyhow!("read put response bytes: {}", e))?;
+                let body: ManifestPutResponse = rmp_serde::from_slice(&bytes)
+                    .map_err(|e| anyhow!("decode msgpack put response: {}", e))?;
                 Ok(CasResult {
                     success: true,
                     etag: Some(body.etag),
@@ -209,13 +229,18 @@ impl ManifestStore for CinchManifestStore {
 
 #[cfg(test)]
 mod tests {
+    //! The mock server here intentionally mirrors the real grabby
+    //! handlers' behavior (msgpack in, msgpack out, `If-Match` for
+    //! CAS) so that this test is a meaningful wire-contract check —
+    //! not a self-fulfilling "client talks to a client-shaped mock."
+
     use super::*;
     use axum::{
         extract::{Query, State},
         http::{HeaderMap, StatusCode},
-        response::IntoResponse,
+        response::{IntoResponse, Response},
         routing::{get, head, post},
-        Json, Router,
+        Router,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -239,15 +264,22 @@ mod tests {
         key: String,
     }
 
+    fn msgpack_response(status: StatusCode, body: Vec<u8>) -> Response {
+        let mut resp = (status, body).into_response();
+        resp.headers_mut()
+            .insert(CONTENT_TYPE, CONTENT_TYPE_MSGPACK.parse().unwrap());
+        resp
+    }
+
     async fn mock_get(
         State(state): State<MockState>,
         Query(params): Query<KeyParam>,
-    ) -> impl IntoResponse {
+    ) -> Response {
         let store = state.store.lock().await;
         match store.get(&params.key) {
             Some(manifest) => {
-                let body = serde_json::json!({ "manifest": manifest });
-                (StatusCode::OK, Json(body)).into_response()
+                let body = rmp_serde::to_vec(manifest).expect("encode");
+                msgpack_response(StatusCode::OK, body)
             }
             None => StatusCode::NOT_FOUND.into_response(),
         }
@@ -256,41 +288,48 @@ mod tests {
     async fn mock_put(
         State(state): State<MockState>,
         Query(params): Query<KeyParam>,
-        Json(body): Json<ManifestPutRequest>,
-    ) -> impl IntoResponse {
-        let mut store = state.store.lock().await;
+        headers: HeaderMap,
+        body: axum::body::Bytes,
+    ) -> Response {
+        let incoming: Manifest = match rmp_serde::from_slice(&body) {
+            Ok(m) => m,
+            Err(e) => return (StatusCode::BAD_REQUEST, format!("decode: {e}")).into_response(),
+        };
+        let expected: Option<u64> = match headers.get(IF_MATCH) {
+            Some(v) => match v.to_str().ok().and_then(|s| s.parse().ok()) {
+                Some(n) => Some(n),
+                None => return (StatusCode::BAD_REQUEST, "bad if-match").into_response(),
+            },
+            None => None,
+        };
 
-        match body.expected_version {
-            None => {
-                if store.contains_key(&params.key) {
-                    return StatusCode::CONFLICT.into_response();
-                }
-                let mut m = body.manifest;
+        let mut store = state.store.lock().await;
+        match (expected, store.get(&params.key).cloned()) {
+            (None, Some(_)) => StatusCode::CONFLICT.into_response(),
+            (None, None) => {
+                let mut m = incoming;
                 m.version = 1;
-                let etag = m.version.to_string();
                 store.insert(params.key, m);
-                (StatusCode::CREATED, Json(serde_json::json!({ "etag": etag }))).into_response()
+                let body = rmp_serde::to_vec(&serde_json::json!({ "etag": "1" })).expect("encode");
+                msgpack_response(StatusCode::CREATED, body)
             }
-            Some(expected) => {
-                let current = store.get(&params.key);
-                match current {
-                    Some(existing) if existing.version == expected => {
-                        let mut m = body.manifest;
-                        m.version = expected + 1;
-                        let etag = m.version.to_string();
-                        store.insert(params.key, m);
-                        (StatusCode::OK, Json(serde_json::json!({ "etag": etag }))).into_response()
-                    }
-                    _ => StatusCode::CONFLICT.into_response(),
-                }
+            (Some(v), Some(existing)) if existing.version == v => {
+                let new_version = v + 1;
+                let mut m = incoming;
+                m.version = new_version;
+                store.insert(params.key, m);
+                let body = rmp_serde::to_vec(&serde_json::json!({ "etag": new_version.to_string() }))
+                    .expect("encode");
+                msgpack_response(StatusCode::OK, body)
             }
+            _ => StatusCode::CONFLICT.into_response(),
         }
     }
 
     async fn mock_head(
         State(state): State<MockState>,
         Query(params): Query<KeyParam>,
-    ) -> impl IntoResponse {
+    ) -> Response {
         let store = state.store.lock().await;
         match store.get(&params.key) {
             Some(manifest) => {
@@ -356,7 +395,7 @@ mod tests {
         let m = make_manifest("node-1");
         let res = store.put("db1", &m, None).await.expect("put");
         assert!(res.success);
-        assert!(res.etag.is_some());
+        assert_eq!(res.etag.as_deref(), Some("1"));
 
         let fetched = store.get("db1").await.expect("get").expect("should exist");
         assert_eq!(fetched.version, 1);
@@ -389,6 +428,7 @@ mod tests {
             .await
             .expect("update");
         assert!(res.success);
+        assert_eq!(res.etag.as_deref(), Some("2"));
 
         let fetched = store.get("db1").await.expect("get").expect("exists");
         assert_eq!(fetched.version, 2);
@@ -479,5 +519,27 @@ mod tests {
         let meta = store.meta("db1").await.unwrap().unwrap();
         assert_eq!(meta.version, 2);
         assert_eq!(meta.writer_id, "node-2");
+    }
+
+    #[tokio::test]
+    async fn test_content_type_is_msgpack_not_json() {
+        // Regression guard against a future accidental revert to JSON.
+        // The mock server only decodes msgpack; if the client sent JSON
+        // it would 400 on the decode step.
+        let (url, _h) = start_mock_server().await;
+        let store = CinchManifestStore::new(&url, "test-token");
+
+        let payload: Vec<u8> = (0u32..512).map(|i| (i & 0xff) as u8).collect();
+        let m = Manifest {
+            version: 0,
+            writer_id: "node-1".into(),
+            timestamp_ms: 0,
+            payload: payload.clone(),
+        };
+        let res = store.put("db1", &m, None).await.expect("put");
+        assert!(res.success);
+
+        let fetched = store.get("db1").await.expect("get").expect("exists");
+        assert_eq!(fetched.payload, payload, "binary payload must round-trip");
     }
 }
