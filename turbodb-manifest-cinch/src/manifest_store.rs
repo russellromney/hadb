@@ -6,7 +6,7 @@
 //!       → 200 Content-Type: application/msgpack  body = rmp_serde(Manifest)
 //!       → 404 (no manifest)
 //!
-//!   POST /v1/sync/manifest?key=...
+//!   PUT  /v1/sync/manifest?key=...
 //!       Content-Type: application/msgpack  body = rmp_serde(Manifest)
 //!       Optional header `If-Match: <expected_version>`
 //!           (absent = create; numeric = CAS against the server-side
@@ -18,6 +18,10 @@
 //!       → 200 with `X-Manifest-Version` + `X-Writer-Id` headers
 //!       → 404 (no manifest)
 //! ```
+//!
+//! PUT matches the verb used by the rest of grabby's sync API
+//! (`/v1/sync/wal/{segment}`, `/v1/sync/snapshot`) for idempotent
+//! writes; the query-string key names the resource.
 //!
 //! The manifest key is a query param. The Bearer token scopes access to
 //! the database.
@@ -145,7 +149,7 @@ impl ManifestStore for CinchManifestStore {
 
         let mut req = self
             .client
-            .post(&self.manifest_url(key))
+            .put(&self.manifest_url(key))
             .bearer_auth(&self.token)
             .header(CONTENT_TYPE, CONTENT_TYPE_MSGPACK)
             .body(body);
@@ -239,7 +243,7 @@ mod tests {
         extract::{Query, State},
         http::{HeaderMap, StatusCode},
         response::{IntoResponse, Response},
-        routing::{get, head, post},
+        routing::{get, head, put},
         Router,
     };
     use std::collections::HashMap;
@@ -285,7 +289,7 @@ mod tests {
         }
     }
 
-    async fn mock_put(
+    async fn mock_update(
         State(state): State<MockState>,
         Query(params): Query<KeyParam>,
         headers: HeaderMap,
@@ -351,7 +355,7 @@ mod tests {
     fn mock_app(state: MockState) -> Router {
         Router::new()
             .route("/v1/sync/manifest", get(mock_get))
-            .route("/v1/sync/manifest", post(mock_put))
+            .route("/v1/sync/manifest", put(mock_update))
             .route("/v1/sync/manifest", head(mock_head))
             .with_state(state)
     }
