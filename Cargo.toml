@@ -14,6 +14,14 @@ members = [
     "hadb-lease-cinch",
     "hadb-changeset",
     "hadb-cli",
+    # turbodb: manifest layer (Phase Turbogenesis). Siblings of the hadb-*
+    # coordination crates; same workspace so they share lockfile + cache.
+    "turbodb",
+    "turbodb-manifest-mem",
+    "turbodb-manifest-s3",
+    "turbodb-manifest-cinch",
+    "turbodb-manifest-nats",
+    "turbodb-manifest-redis",
 ]
 resolver = "2"
 

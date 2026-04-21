@@ -1,0 +1,26 @@
+[package]
+name = "turbodb-manifest-cinch"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ManifestStore for turbodb over Cinch's /v1/sync/manifest HTTP wire (Bearer auth, fenced writes). Renamed from hadb-manifest-http during Phase Turbogenesis to reflect the cinch-specific wire contract."
+keywords = ["database", "manifest", "http", "cinch"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+turbodb = { path = "../turbodb", version = "0.4.0" }
+hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+axum = "0.8"
+uuid = { version = "1", features = ["v4"] }
+rmp-serde = { workspace = true }

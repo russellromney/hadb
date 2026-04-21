@@ -6,6 +6,21 @@ Reference implementations: [turbolite](https://github.com/russellromney/turbolit
 
 See [SPEC.md](SPEC.md) for the full implementation specification.
 
+## Rust crate family (in this workspace)
+
+The manifest layer — `Manifest`, `Backend`, `ManifestStore` trait, and five backend impls — ships as `turbodb*` sibling crates under `hadb/`:
+
+| Crate | Purpose |
+|---|---|
+| `turbodb` | Trait crate. `Manifest`, `Backend`, `ManifestMeta`, `FrameEntry`, `BTreeManifestEntry`, `SubframeOverride`, `ManifestStore`. Depends on `hadb-storage` for `CasResult`. No impls. |
+| `turbodb-manifest-mem` | `MemManifestStore` — in-memory, test-only. |
+| `turbodb-manifest-s3` | `S3ManifestStore` — S3 conditional PUTs (If-Match / If-None-Match). |
+| `turbodb-manifest-cinch` | `CinchManifestStore` — Cinch's `/v1/sync/manifest` HTTP wire (Bearer auth + Fence-Token headers). |
+| `turbodb-manifest-nats` | `NatsManifestStore` — NATS JetStream KV with revision-based CAS. |
+| `turbodb-manifest-redis` | `RedisManifestStore` — Redis Lua-script CAS with hash-tagged version side-keys. |
+
+The turbolite / turbograph / turboduck reference implementations (the actual tiered-storage engines on top of turbodb's commit format) are separate repos.
+
 ## The idea
 
 Embedded databases store everything on local disk. That's fast, but local disk is expensive, sized for peak, and lost when the node dies. S3 is durable, cheap ($0.02/GB/month), and infinite, but too slow for random reads.
