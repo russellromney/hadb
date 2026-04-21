@@ -28,7 +28,6 @@ pub mod client;
 pub mod coordinator;
 pub mod follower;
 pub mod lease;
-pub mod manifest;
 pub mod metrics;
 pub mod node_registry;
 pub mod traits;
@@ -36,11 +35,7 @@ pub mod types;
 
 // Re-export core traits
 pub use hadb_lease::{CasResult, LeaseStore};
-pub use traits::{ManifestStore, Replicator, StorageBackend};
-pub use manifest::{
-    BTreeManifestEntry, FrameEntry, HaManifest, InMemoryManifestStore, ManifestMeta,
-    StorageManifest, SubframeOverride,
-};
+pub use traits::{Replicator, StorageBackend};
 pub use types::{CoordinatorConfig, Durability, HaMode, LeaseConfig, Role, RoleEvent, validate_mode_durability};
 pub use metrics::{HaMetrics, MetricsSnapshot};
 pub use lease::{DbLease, InMemoryLeaseStore, LeaseData};

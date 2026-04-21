@@ -10,6 +10,8 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use hadb::*;
+use turbodb::{Backend, Manifest, ManifestStore};
+use turbodb_manifest_mem::MemManifestStore;
 
 // ============================================================================
 // Mock Implementations
@@ -560,7 +562,7 @@ async fn test_manifest_store_accessor_none() {
 #[tokio::test]
 async fn test_manifest_store_accessor_some() {
     let replicator = MockReplicator::new();
-    let manifest_store: Arc<dyn ManifestStore> = Arc::new(InMemoryManifestStore::new());
+    let manifest_store: Arc<dyn ManifestStore> = Arc::new(MemManifestStore::new());
 
     let coordinator = Coordinator::new(
         Arc::new(replicator),
@@ -590,7 +592,7 @@ async fn test_manifest_poll_interval_custom() {
 #[tokio::test]
 async fn test_coordinator_with_manifest_store_joins_as_leader() {
     let replicator = MockReplicator::new();
-    let manifest_store: Arc<dyn ManifestStore> = Arc::new(InMemoryManifestStore::new());
+    let manifest_store: Arc<dyn ManifestStore> = Arc::new(MemManifestStore::new());
 
     let coordinator = Coordinator::new(
         Arc::new(replicator),
@@ -625,7 +627,7 @@ async fn test_manifest_changed_event_variant() {
 async fn test_manifest_polling_emits_event_on_version_change() {
     // Set up a coordinator as follower with a manifest store.
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
-    let manifest_store = Arc::new(InMemoryManifestStore::new());
+    let manifest_store = Arc::new(MemManifestStore::new());
 
     // Pre-claim the lease so our coordinator joins as follower.
     lease_store
@@ -673,12 +675,12 @@ async fn test_manifest_polling_emits_event_on_version_change() {
     assert!(matches!(joined, RoleEvent::Joined { role: Role::Follower, .. }));
 
     // Publish initial manifest (v1) so the poll establishes a baseline.
-    let manifest = HaManifest {
+    let manifest = Manifest {
         version: 0,
         writer_id: "other-node".to_string(),
         lease_epoch: 1,
         timestamp_ms: 1000,
-        storage: StorageManifest::Walrust {
+        storage: Backend::Walrust {
             txid: 1,
             changeset_prefix: "cs/".to_string(),
             latest_changeset_key: "cs/1".to_string(),
@@ -738,7 +740,7 @@ async fn test_manifest_polling_emits_event_on_version_change() {
 #[tokio::test]
 async fn test_manifest_polling_no_event_when_version_unchanged() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
-    let manifest_store = Arc::new(InMemoryManifestStore::new());
+    let manifest_store = Arc::new(MemManifestStore::new());
 
     // Pre-claim lease so we join as follower.
     lease_store
@@ -759,12 +761,12 @@ async fn test_manifest_polling_no_event_when_version_unchanged() {
         .unwrap();
 
     // Pre-publish a manifest before joining, so the first poll sees version 1.
-    let manifest = HaManifest {
+    let manifest = Manifest {
         version: 0,
         writer_id: "other-node".to_string(),
         lease_epoch: 1,
         timestamp_ms: 1000,
-        storage: StorageManifest::Walrust {
+        storage: Backend::Walrust {
             txid: 1,
             changeset_prefix: "cs/".to_string(),
             latest_changeset_key: "cs/1".to_string(),
