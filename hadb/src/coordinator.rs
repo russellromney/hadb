@@ -20,7 +20,7 @@ use crate::follower::{run_leader_renewal, run_lease_monitor, FollowerBehavior, L
 use crate::lease::DbLease;
 use crate::metrics::HaMetrics;
 use crate::node_registry::{NodeRegistration, NodeRegistry};
-use crate::manifest::ManifestStore;
+use turbodb::ManifestStore;
 use crate::traits::Replicator;
 use crate::types::{CoordinatorConfig, Role, RoleEvent};
 

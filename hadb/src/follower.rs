@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, watch, RwLock};
 
 use crate::coordinator::AtomicRole;
 use crate::lease::DbLease;
-use crate::manifest::ManifestStore;
+use turbodb::ManifestStore;
 use crate::metrics::HaMetrics;
 use crate::node_registry::NodeRegistry;
 use crate::traits::Replicator;

@@ -12,10 +12,6 @@ members = [
     "hadb-lease-s3",
     "hadb-lease-nats",
     "hadb-lease-cinch",
-    "hadb-manifest-s3",
-    "hadb-manifest-nats",
-    "hadb-manifest-redis",
-    "hadb-manifest-http",
     "hadb-changeset",
     "hadb-cli",
 ]

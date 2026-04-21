@@ -27,6 +27,11 @@ reqwest = { workspace = true }
 hadb-lease = { path = "../hadb-lease", version = "0.4.0" }
 hadb-lease-mem = { path = "../hadb-lease-mem", version = "0.4.0" }
 
+# turbodb manifest layer (extracted from hadb in Phase Turbogenesis).
+# hadb's Coordinator takes Arc<dyn turbodb::ManifestStore>; the trait
+# itself lives in turbodb, not here.
+turbodb = { path = "../../turbodb/turbodb", version = "0.1.0" }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
@@ -34,7 +39,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 proptest = { workspace = true }
 proptest-derive = { workspace = true }
-aws-sdk-s3 = "1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
 hadb-lease-s3 = { path = "../hadb-lease-s3" }
-hadb-manifest-s3 = { path = "../hadb-manifest-s3" }
+turbodb-manifest-mem = { path = "../../turbodb/turbodb-manifest-mem", version = "0.1.0" }
