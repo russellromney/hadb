@@ -1,20 +1,24 @@
 //! hadb: Database-agnostic HA coordination framework.
 //!
 //! Pure coordination logic with zero cloud dependencies. Abstracts away
-//! databases (SQL, graph, document) and storage backends (S3, etcd, Consul).
+//! databases (SQL, graph, document) and storage backends. Manifest types
+//! and the `ManifestStore` trait live in the sibling `turbodb` crate
+//! (extracted in Phase Turbogenesis); hadb depends on turbodb for that
+//! trait surface and owns the lease/coordination side.
 //!
 //! ```ignore
 //! use hadb::{Coordinator, CoordinatorConfig, LeaseConfig};
+//! use turbodb::ManifestStore;
 //!
+//! // The lease store lives on LeaseConfig; None here = no HA (always leader).
 //! let config = CoordinatorConfig {
-//!     lease: Some(LeaseConfig::new(instance_id, address)),
+//!     lease: Some(LeaseConfig::new(lease_store, instance_id, address)),
 //!     ..Default::default()
 //! };
 //!
 //! let coordinator = Coordinator::new(
 //!     replicator,              // Arc<dyn Replicator>
-//!     Some(lease_store),       // Option<Arc<dyn LeaseStore>>
-//!     Some(manifest_store),    // Option<Arc<dyn ManifestStore>>
+//!     Some(manifest_store),    // Option<Arc<dyn turbodb::ManifestStore>>
 //!     None,                    // Option<Arc<dyn NodeRegistry>>
 //!     follower_behavior,       // Arc<dyn FollowerBehavior>
 //!     "prefix/",
