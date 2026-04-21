@@ -8,11 +8,11 @@ See [SPEC.md](SPEC.md) for the full implementation specification.
 
 ## Rust crate family (in this workspace)
 
-The manifest layer — `Manifest`, `Backend`, `ManifestStore` trait, and five backend impls — ships as `turbodb*` sibling crates under `hadb/`:
+The manifest envelope — `Manifest`, `ManifestMeta`, `ManifestStore` trait, and five backend impls — ships as `turbodb*` sibling crates under `hadb/`. The manifest's `payload` is an opaque `Vec<u8>`; its shape belongs to each consumer (turbolite, turbograph, future turboduck), keeping the abstraction open.
 
 | Crate | Purpose |
 |---|---|
-| `turbodb` | Trait crate. `Manifest`, `Backend`, `ManifestMeta`, `FrameEntry`, `BTreeManifestEntry`, `SubframeOverride`, `ManifestStore`. Depends on `hadb-storage` for `CasResult`. No impls. |
+| `turbodb` | Trait crate. `Manifest` (opaque-payload envelope), `ManifestMeta`, `ManifestStore`. Depends on `hadb-storage` for `CasResult`. No impls. |
 | `turbodb-manifest-mem` | `MemManifestStore` — in-memory, test-only. |
 | `turbodb-manifest-s3` | `S3ManifestStore` — S3 conditional PUTs (If-Match / If-None-Match). |
 | `turbodb-manifest-cinch` | `CinchManifestStore` — Cinch's `/v1/sync/manifest` HTTP wire (Bearer auth + Fence-Token headers). |

@@ -1,7 +1,7 @@
 //! turbodb-manifest-s3: S3 ManifestStore for turbodb.
 //!
 //! Stores `Manifest` as msgpack in the S3 object body, with
-//! version/writer_id/lease_epoch in custom metadata headers for cheap
+//! version/writer_id in custom metadata headers for cheap
 //! HeadObject polling.
 //!
 //! ```ignore

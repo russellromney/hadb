@@ -5,7 +5,7 @@
 //!   GET  /v1/sync/manifest?key=...  -> 200 { manifest: Manifest } or 404
 //!   POST /v1/sync/manifest?key=...  -> 201 { etag: "..." } or 409 (conflict)
 //!                                      Body: { manifest: Manifest, expected_version: u64|null }
-//!   HEAD /v1/sync/manifest?key=...  -> 200 with X-Manifest-Version, X-Writer-Id, X-Lease-Epoch headers
+//!   HEAD /v1/sync/manifest?key=...  -> 200 with X-Manifest-Version, X-Writer-Id headers
 //!                                      or 404
 //! ```
 //!
@@ -193,18 +193,9 @@ impl ManifestStore for CinchManifestStore {
                     .map_err(|e| anyhow!("invalid X-Writer-Id: {}", e))?
                     .to_string();
 
-                let lease_epoch: u64 = headers
-                    .get("X-Lease-Epoch")
-                    .ok_or_else(|| anyhow!("missing X-Lease-Epoch header"))?
-                    .to_str()
-                    .map_err(|e| anyhow!("invalid X-Lease-Epoch: {}", e))?
-                    .parse()
-                    .map_err(|e| anyhow!("non-numeric X-Lease-Epoch: {}", e))?;
-
                 Ok(Some(ManifestMeta {
                     version,
                     writer_id,
-                    lease_epoch,
                 }))
             }
             reqwest::StatusCode::NOT_FOUND => Ok(None),
@@ -229,7 +220,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use turbodb::Backend;
 
     #[derive(Clone)]
     struct MockState {
@@ -313,10 +303,6 @@ mod tests {
                     "X-Writer-Id",
                     manifest.writer_id.parse().expect("header"),
                 );
-                headers.insert(
-                    "X-Lease-Epoch",
-                    manifest.lease_epoch.to_string().parse().expect("header"),
-                );
                 (StatusCode::OK, headers).into_response()
             }
             None => StatusCode::NOT_FOUND.into_response(),
@@ -346,19 +332,12 @@ mod tests {
         (url, handle)
     }
 
-    fn make_walrust_manifest(writer: &str, epoch: u64) -> Manifest {
+    fn make_manifest(writer: &str) -> Manifest {
         Manifest {
             version: 0,
             writer_id: writer.to_string(),
-            lease_epoch: epoch,
             timestamp_ms: 1000,
-            storage: Backend::Walrust {
-                txid: 1,
-                changeset_prefix: "cs/".to_string(),
-                latest_changeset_key: "cs/1".to_string(),
-                snapshot_key: None,
-                snapshot_txid: None,
-            },
+            payload: b"test-payload".to_vec(),
         }
     }
 
@@ -374,7 +353,7 @@ mod tests {
         let (url, _h) = start_mock_server().await;
         let store = CinchManifestStore::new(&url, "test-token");
 
-        let m = make_walrust_manifest("node-1", 1);
+        let m = make_manifest("node-1");
         let res = store.put("db1", &m, None).await.expect("put");
         assert!(res.success);
         assert!(res.etag.is_some());
@@ -382,7 +361,7 @@ mod tests {
         let fetched = store.get("db1").await.expect("get").expect("should exist");
         assert_eq!(fetched.version, 1);
         assert_eq!(fetched.writer_id, "node-1");
-        assert_eq!(fetched.lease_epoch, 1);
+        assert_eq!(fetched.payload, b"test-payload");
     }
 
     #[tokio::test]
@@ -390,7 +369,7 @@ mod tests {
         let (url, _h) = start_mock_server().await;
         let store = CinchManifestStore::new(&url, "test-token");
 
-        let m = make_walrust_manifest("node-1", 1);
+        let m = make_manifest("node-1");
         store.put("db1", &m, None).await.expect("first put");
 
         let res = store.put("db1", &m, None).await.expect("second put");
@@ -402,18 +381,17 @@ mod tests {
         let (url, _h) = start_mock_server().await;
         let store = CinchManifestStore::new(&url, "test-token");
 
-        let m = make_walrust_manifest("node-1", 1);
+        let m = make_manifest("node-1");
         store.put("db1", &m, None).await.expect("create");
 
         let res = store
-            .put("db1", &make_walrust_manifest("node-1", 2), Some(1))
+            .put("db1", &make_manifest("node-1"), Some(1))
             .await
             .expect("update");
         assert!(res.success);
 
         let fetched = store.get("db1").await.expect("get").expect("exists");
         assert_eq!(fetched.version, 2);
-        assert_eq!(fetched.lease_epoch, 2);
     }
 
     #[tokio::test]
@@ -421,15 +399,15 @@ mod tests {
         let (url, _h) = start_mock_server().await;
         let store = CinchManifestStore::new(&url, "test-token");
 
-        let m = make_walrust_manifest("node-1", 1);
+        let m = make_manifest("node-1");
         store.put("db1", &m, None).await.expect("create");
         store
-            .put("db1", &make_walrust_manifest("node-1", 1), Some(1))
+            .put("db1", &make_manifest("node-1"), Some(1))
             .await
             .expect("update v1->v2");
 
         let res = store
-            .put("db1", &make_walrust_manifest("node-1", 1), Some(1))
+            .put("db1", &make_manifest("node-1"), Some(1))
             .await
             .expect("stale update");
         assert!(!res.success);
@@ -440,13 +418,12 @@ mod tests {
         let (url, _h) = start_mock_server().await;
         let store = CinchManifestStore::new(&url, "test-token");
 
-        let m = make_walrust_manifest("node-42", 7);
+        let m = make_manifest("node-42");
         store.put("db1", &m, None).await.expect("create");
 
         let meta = store.meta("db1").await.expect("meta").expect("exists");
         assert_eq!(meta.version, 1);
         assert_eq!(meta.writer_id, "node-42");
-        assert_eq!(meta.lease_epoch, 7);
     }
 
     #[tokio::test]
@@ -461,7 +438,7 @@ mod tests {
         let (url, _h) = start_mock_server().await;
         let store = CinchManifestStore::new(&url, "test-token");
 
-        let m = make_walrust_manifest("node-1", 1);
+        let m = make_manifest("node-1");
         store.put("db1", &m, None).await.expect("v1");
         assert_eq!(store.get("db1").await.unwrap().unwrap().version, 1);
 
@@ -477,7 +454,7 @@ mod tests {
         let (url, _h) = start_mock_server().await;
         let store = CinchManifestStore::new(&url, "test-token");
 
-        let mut m = make_walrust_manifest("node-1", 1);
+        let mut m = make_manifest("node-1");
         m.version = 999;
         store.put("db1", &m, None).await.expect("create");
 
@@ -491,17 +468,16 @@ mod tests {
         let store = CinchManifestStore::new(&url, "test-token");
 
         store
-            .put("db1", &make_walrust_manifest("node-1", 1), None)
+            .put("db1", &make_manifest("node-1"), None)
             .await
             .expect("create");
         store
-            .put("db1", &make_walrust_manifest("node-2", 5), Some(1))
+            .put("db1", &make_manifest("node-2"), Some(1))
             .await
             .expect("update");
 
         let meta = store.meta("db1").await.unwrap().unwrap();
         assert_eq!(meta.version, 2);
         assert_eq!(meta.writer_id, "node-2");
-        assert_eq!(meta.lease_epoch, 5);
     }
 }

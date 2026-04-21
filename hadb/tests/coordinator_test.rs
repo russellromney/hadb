@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use hadb::*;
-use turbodb::{Backend, Manifest, ManifestStore};
+use turbodb::{Manifest, ManifestStore};
 use turbodb_manifest_mem::MemManifestStore;
 
 // ============================================================================
@@ -678,15 +678,8 @@ async fn test_manifest_polling_emits_event_on_version_change() {
     let manifest = Manifest {
         version: 0,
         writer_id: "other-node".to_string(),
-        lease_epoch: 1,
         timestamp_ms: 1000,
-        storage: Backend::Walrust {
-            txid: 1,
-            changeset_prefix: "cs/".to_string(),
-            latest_changeset_key: "cs/1".to_string(),
-            snapshot_key: None,
-            snapshot_txid: None,
-        },
+        payload: b"test-payload".to_vec(),
     };
     manifest_store
         .put("test-prefix/ha_db1/manifest", &manifest, None)
@@ -764,15 +757,8 @@ async fn test_manifest_polling_no_event_when_version_unchanged() {
     let manifest = Manifest {
         version: 0,
         writer_id: "other-node".to_string(),
-        lease_epoch: 1,
         timestamp_ms: 1000,
-        storage: Backend::Walrust {
-            txid: 1,
-            changeset_prefix: "cs/".to_string(),
-            latest_changeset_key: "cs/1".to_string(),
-            snapshot_key: None,
-            snapshot_txid: None,
-        },
+        payload: b"test-payload".to_vec(),
     };
     manifest_store
         .put("test-prefix/ha_db1/manifest", &manifest, None)

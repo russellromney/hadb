@@ -171,58 +171,13 @@ impl ManifestStore for NatsManifestStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use turbodb::{BTreeManifestEntry, Backend, FrameEntry};
 
-    fn make_manifest(writer: &str, epoch: u64) -> Manifest {
+    fn make_manifest(writer: &str) -> Manifest {
         Manifest {
             version: 0,
             writer_id: writer.to_string(),
-            lease_epoch: epoch,
             timestamp_ms: 1000,
-            storage: Backend::Walrust {
-                txid: 1,
-                changeset_prefix: "cs/".to_string(),
-                latest_changeset_key: "cs/1".to_string(),
-                snapshot_key: None,
-                snapshot_txid: None,
-            },
-        }
-    }
-
-    fn make_turbolite_manifest(writer: &str, epoch: u64) -> Manifest {
-        Manifest {
-            version: 0,
-            writer_id: writer.to_string(),
-            lease_epoch: epoch,
-            timestamp_ms: 2000,
-            storage: Backend::Turbolite {
-                page_count: 100,
-                page_size: 4096,
-                pages_per_group: 256,
-                sub_pages_per_frame: 16,
-                strategy: "Positional".to_string(),
-                page_group_keys: vec!["pg-0".to_string()],
-                frame_tables: vec![vec![FrameEntry {
-                    offset: 0,
-                    len: 4096,
-                    page_count: 0,
-                }]],
-                group_pages: vec![vec![1, 2, 3]],
-                btrees: BTreeMap::from([(
-                    1,
-                    BTreeManifestEntry {
-                        name: "sqlite_master".to_string(),
-                        obj_type: "table".to_string(),
-                        group_ids: vec![0, 1],
-                    },
-                )]),
-                interior_chunk_keys: BTreeMap::from([(0, "ic-0".to_string())]),
-                index_chunk_keys: BTreeMap::from([(0, "idx-0".to_string())]),
-                subframe_overrides: vec![BTreeMap::new()],
-                turbolite_version: 0,
-                db_header: None,
-            },
+            payload: b"test-payload".to_vec(),
         }
     }
 
@@ -285,33 +240,14 @@ mod tests {
     async fn test_put_create_and_get() {
         let f = TestFixture::new().await;
 
-        let res = f.put("db1", &make_manifest("node-1", 1), None).await.unwrap();
+        let res = f.put("db1", &make_manifest("node-1"), None).await.unwrap();
         assert!(res.success);
         assert!(res.etag.is_some());
 
         let fetched = f.get("db1").await.unwrap().expect("should exist");
         assert_eq!(fetched.version, 1);
         assert_eq!(fetched.writer_id, "node-1");
-        assert_eq!(fetched.lease_epoch, 1);
-        assert!(matches!(fetched.storage, Backend::Walrust { .. }));
-        f.cleanup().await;
-    }
-
-    #[tokio::test]
-    async fn test_put_create_turbolite_roundtrip() {
-        let f = TestFixture::new().await;
-
-        f.put("db1", &make_turbolite_manifest("node-1", 1), None)
-            .await
-            .unwrap();
-        let fetched = f.get("db1").await.unwrap().expect("should exist");
-        match &fetched.storage {
-            Backend::Turbolite { page_count, page_size, .. } => {
-                assert_eq!(*page_count, 100);
-                assert_eq!(*page_size, 4096);
-            }
-            _ => panic!("expected Turbolite"),
-        }
+        assert_eq!(fetched.payload, b"test-payload");
         f.cleanup().await;
     }
 
@@ -319,13 +255,12 @@ mod tests {
     async fn test_put_update_with_correct_version() {
         let f = TestFixture::new().await;
 
-        f.put("db1", &make_manifest("node-1", 1), None).await.unwrap();
-        let res = f.put("db1", &make_manifest("node-1", 2), Some(1)).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), None).await.unwrap();
+        let res = f.put("db1", &make_manifest("node-1"), Some(1)).await.unwrap();
         assert!(res.success);
 
         let fetched = f.get("db1").await.unwrap().unwrap();
         assert_eq!(fetched.version, 2);
-        assert_eq!(fetched.lease_epoch, 2);
         f.cleanup().await;
     }
 
@@ -333,11 +268,10 @@ mod tests {
     async fn test_meta_returns_correct_fields() {
         let f = TestFixture::new().await;
 
-        f.put("db1", &make_manifest("node-42", 7), None).await.unwrap();
+        f.put("db1", &make_manifest("node-42"), None).await.unwrap();
         let meta = f.meta("db1").await.unwrap().expect("should exist");
         assert_eq!(meta.version, 1);
         assert_eq!(meta.writer_id, "node-42");
-        assert_eq!(meta.lease_epoch, 7);
         f.cleanup().await;
     }
 
@@ -352,8 +286,8 @@ mod tests {
     async fn test_put_create_conflict() {
         let f = TestFixture::new().await;
 
-        f.put("db1", &make_manifest("node-1", 1), None).await.unwrap();
-        let res = f.put("db1", &make_manifest("node-2", 1), None).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), None).await.unwrap();
+        let res = f.put("db1", &make_manifest("node-2"), None).await.unwrap();
         assert!(!res.success);
         f.cleanup().await;
     }
@@ -362,10 +296,10 @@ mod tests {
     async fn test_put_stale_version() {
         let f = TestFixture::new().await;
 
-        f.put("db1", &make_manifest("node-1", 1), None).await.unwrap();
-        f.put("db1", &make_manifest("node-1", 1), Some(1)).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), None).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), Some(1)).await.unwrap();
 
-        let res = f.put("db1", &make_manifest("node-1", 1), Some(1)).await.unwrap();
+        let res = f.put("db1", &make_manifest("node-1"), Some(1)).await.unwrap();
         assert!(!res.success);
         f.cleanup().await;
     }
@@ -373,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn test_put_version_on_nonexistent() {
         let f = TestFixture::new().await;
-        let res = f.put("db1", &make_manifest("node-1", 1), Some(1)).await.unwrap();
+        let res = f.put("db1", &make_manifest("node-1"), Some(1)).await.unwrap();
         assert!(!res.success);
         f.cleanup().await;
     }
@@ -382,13 +316,13 @@ mod tests {
     async fn test_sequential_version_increments() {
         let f = TestFixture::new().await;
 
-        f.put("db1", &make_manifest("node-1", 1), None).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), None).await.unwrap();
         assert_eq!(f.get("db1").await.unwrap().unwrap().version, 1);
 
-        f.put("db1", &make_manifest("node-1", 1), Some(1)).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), Some(1)).await.unwrap();
         assert_eq!(f.get("db1").await.unwrap().unwrap().version, 2);
 
-        f.put("db1", &make_manifest("node-1", 1), Some(2)).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), Some(2)).await.unwrap();
         assert_eq!(f.get("db1").await.unwrap().unwrap().version, 3);
         f.cleanup().await;
     }
@@ -397,13 +331,12 @@ mod tests {
     async fn test_meta_updates_after_put() {
         let f = TestFixture::new().await;
 
-        f.put("db1", &make_manifest("node-1", 1), None).await.unwrap();
-        f.put("db1", &make_manifest("node-2", 5), Some(1)).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), None).await.unwrap();
+        f.put("db1", &make_manifest("node-2"), Some(1)).await.unwrap();
 
         let meta = f.meta("db1").await.unwrap().unwrap();
         assert_eq!(meta.version, 2);
         assert_eq!(meta.writer_id, "node-2");
-        assert_eq!(meta.lease_epoch, 5);
         f.cleanup().await;
     }
 
@@ -411,7 +344,7 @@ mod tests {
     async fn test_put_ignores_caller_version() {
         let f = TestFixture::new().await;
 
-        let mut m = make_manifest("node-1", 1);
+        let mut m = make_manifest("node-1");
         m.version = 999;
         f.put("db1", &m, None).await.unwrap();
 
@@ -424,17 +357,13 @@ mod tests {
     async fn test_multiple_keys_independent() {
         let f = TestFixture::new().await;
 
-        f.put("db1", &make_manifest("node-1", 1), None).await.unwrap();
-        f.put("db2", &make_turbolite_manifest("node-2", 2), None)
-            .await
-            .unwrap();
+        f.put("db1", &make_manifest("node-1"), None).await.unwrap();
+        f.put("db2", &make_manifest("node-2"), None).await.unwrap();
 
         let m1 = f.get("db1").await.unwrap().unwrap();
         let m2 = f.get("db2").await.unwrap().unwrap();
         assert_eq!(m1.writer_id, "node-1");
         assert_eq!(m2.writer_id, "node-2");
-        assert!(matches!(m1.storage, Backend::Walrust { .. }));
-        assert!(matches!(m2.storage, Backend::Turbolite { .. }));
         f.cleanup().await;
     }
 }

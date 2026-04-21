@@ -1,10 +1,10 @@
-//! turbodb: Manifest types + `ManifestStore` trait for tiered embedded databases.
+//! turbodb: Manifest envelope + `ManifestStore` trait for tiered embedded databases.
 //!
-//! This crate is the shared commit format for the turbodb family
-//! (`turbolite`, `turbograph`, future `turboduck`). It defines the wire
-//! shape of a manifest (`Manifest`, `Backend`, `FrameEntry`, …) and the
-//! `ManifestStore` trait that backends implement to publish manifests
-//! atomically.
+//! This crate defines the shared envelope shape (`Manifest`,
+//! `ManifestMeta`) and the `ManifestStore` trait that backends implement
+//! to publish manifests atomically. The envelope's `payload` is an
+//! opaque `Vec<u8>`; its shape belongs to the consumer (turbolite,
+//! turbograph, future turboduck).
 //!
 //! Implementations live in sibling crates: `turbodb-manifest-mem`
 //! (tests), `turbodb-manifest-s3`, `turbodb-manifest-cinch`,
@@ -24,6 +24,4 @@ mod types;
 
 pub use hadb_storage::CasResult;
 pub use store::ManifestStore;
-pub use types::{
-    BTreeManifestEntry, Backend, FrameEntry, Manifest, ManifestMeta, SubframeOverride,
-};
+pub use types::{Manifest, ManifestMeta};

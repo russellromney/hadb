@@ -1,59 +1,17 @@
 //! CAS-semantic tests for `MemManifestStore`. Ported from
-//! `hadb::manifest` tests during Phase Turbogenesis.
+//! `hadb::manifest` tests during Phase Turbogenesis; reduced to
+//! envelope-level checks in Phase Turbogenesis-b (payload shape is
+//! no longer turbodb's concern).
 
-use std::collections::BTreeMap;
-use turbodb::{BTreeManifestEntry, Backend, FrameEntry, Manifest, ManifestStore};
+use turbodb::{Manifest, ManifestStore};
 use turbodb_manifest_mem::MemManifestStore;
 
-fn make_turbolite_manifest(writer: &str, epoch: u64) -> Manifest {
+fn make_manifest(writer: &str) -> Manifest {
     Manifest {
         version: 0,
         writer_id: writer.to_string(),
-        lease_epoch: epoch,
         timestamp_ms: 1000,
-        storage: Backend::Turbolite {
-            page_count: 100,
-            page_size: 4096,
-            pages_per_group: 256,
-            sub_pages_per_frame: 16,
-            strategy: "Positional".to_string(),
-            page_group_keys: vec!["pg-0".to_string()],
-            frame_tables: vec![vec![FrameEntry {
-                offset: 0,
-                len: 4096,
-                page_count: 0,
-            }]],
-            group_pages: vec![vec![1, 2, 3]],
-            btrees: BTreeMap::from([(
-                1,
-                BTreeManifestEntry {
-                    name: "sqlite_master".to_string(),
-                    obj_type: "table".to_string(),
-                    group_ids: vec![0, 1],
-                },
-            )]),
-            interior_chunk_keys: BTreeMap::from([(0, "ic-0".to_string())]),
-            index_chunk_keys: BTreeMap::from([(0, "idx-0".to_string())]),
-            subframe_overrides: vec![BTreeMap::new()],
-            turbolite_version: 0,
-            db_header: None,
-        },
-    }
-}
-
-fn make_walrust_manifest(writer: &str, epoch: u64) -> Manifest {
-    Manifest {
-        version: 0,
-        writer_id: writer.to_string(),
-        lease_epoch: epoch,
-        timestamp_ms: 2000,
-        storage: Backend::Walrust {
-            txid: 42,
-            changeset_prefix: "cs/".to_string(),
-            latest_changeset_key: "cs/42".to_string(),
-            snapshot_key: Some("snap/1".to_string()),
-            snapshot_txid: Some(40),
-        },
+        payload: b"test-payload".to_vec(),
     }
 }
 
@@ -64,56 +22,32 @@ fn make_walrust_manifest(writer: &str, epoch: u64) -> Manifest {
 #[tokio::test]
 async fn put_none_on_empty_store_succeeds() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
     let res = store.put("db1", &m, None).await.unwrap();
     assert!(res.success);
     assert_eq!(res.etag, Some("1".to_string()));
 }
 
 #[tokio::test]
-async fn get_returns_what_was_put_turbolite() {
+async fn get_returns_what_was_put() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
     store.put("db1", &m, None).await.unwrap();
 
     let fetched = store.get("db1").await.unwrap().expect("should exist");
     assert_eq!(fetched.version, 1);
     assert_eq!(fetched.writer_id, "node-1");
-    assert_eq!(fetched.lease_epoch, 1);
     assert_eq!(fetched.timestamp_ms, 1000);
-    match &fetched.storage {
-        Backend::Turbolite { page_count, page_size, .. } => {
-            assert_eq!(*page_count, 100);
-            assert_eq!(*page_size, 4096);
-        }
-        _ => panic!("expected Turbolite variant"),
-    }
-}
-
-#[tokio::test]
-async fn get_returns_what_was_put_walrust() {
-    let store = MemManifestStore::new();
-    let m = make_walrust_manifest("node-2", 5);
-    store.put("db2", &m, None).await.unwrap();
-
-    let fetched = store.get("db2").await.unwrap().expect("should exist");
-    assert_eq!(fetched.writer_id, "node-2");
-    match &fetched.storage {
-        Backend::Walrust { txid, snapshot_key, .. } => {
-            assert_eq!(*txid, 42);
-            assert_eq!(snapshot_key.as_deref(), Some("snap/1"));
-        }
-        _ => panic!("expected Walrust variant"),
-    }
+    assert_eq!(fetched.payload, b"test-payload");
 }
 
 #[tokio::test]
 async fn put_with_correct_expected_version_succeeds() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
     store.put("db1", &m, None).await.unwrap();
 
-    let m2 = make_turbolite_manifest("node-1", 1);
+    let m2 = make_manifest("node-1");
     let res = store.put("db1", &m2, Some(1)).await.unwrap();
     assert!(res.success);
     assert_eq!(res.etag, Some("2".to_string()));
@@ -125,13 +59,12 @@ async fn put_with_correct_expected_version_succeeds() {
 #[tokio::test]
 async fn meta_returns_correct_fields() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 7);
+    let m = make_manifest("node-1");
     store.put("db1", &m, None).await.unwrap();
 
     let meta = store.meta("db1").await.unwrap().expect("should exist");
     assert_eq!(meta.version, 1);
     assert_eq!(meta.writer_id, "node-1");
-    assert_eq!(meta.lease_epoch, 7);
 }
 
 // ============================================================================
@@ -141,7 +74,7 @@ async fn meta_returns_correct_fields() {
 #[tokio::test]
 async fn put_none_on_existing_key_fails() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
     store.put("db1", &m, None).await.unwrap();
 
     let res = store.put("db1", &m, None).await.unwrap();
@@ -152,16 +85,16 @@ async fn put_none_on_existing_key_fails() {
 #[tokio::test]
 async fn put_with_stale_expected_version_fails() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
     store.put("db1", &m, None).await.unwrap();
 
     store
-        .put("db1", &make_turbolite_manifest("node-1", 1), Some(1))
+        .put("db1", &make_manifest("node-1"), Some(1))
         .await
         .unwrap();
 
     let res = store
-        .put("db1", &make_turbolite_manifest("node-1", 1), Some(1))
+        .put("db1", &make_manifest("node-1"), Some(1))
         .await
         .unwrap();
     assert!(!res.success);
@@ -170,7 +103,7 @@ async fn put_with_stale_expected_version_fails() {
 #[tokio::test]
 async fn put_with_expected_version_on_nonexistent_fails() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
     let res = store.put("db1", &m, Some(1)).await.unwrap();
     assert!(!res.success);
 }
@@ -194,7 +127,7 @@ async fn meta_nonexistent_returns_none() {
 #[tokio::test]
 async fn sequential_puts_increment_version() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
 
     store.put("db1", &m, None).await.unwrap();
     assert_eq!(store.get("db1").await.unwrap().unwrap().version, 1);
@@ -212,15 +145,15 @@ async fn sequential_puts_increment_version() {
 #[tokio::test]
 async fn concurrent_puts_same_expected_version_one_wins() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
     store.put("db1", &m, None).await.unwrap();
 
     let r1 = store
-        .put("db1", &make_turbolite_manifest("node-A", 1), Some(1))
+        .put("db1", &make_manifest("node-A"), Some(1))
         .await
         .unwrap();
     let r2 = store
-        .put("db1", &make_turbolite_manifest("node-B", 1), Some(1))
+        .put("db1", &make_manifest("node-B"), Some(1))
         .await
         .unwrap();
 
@@ -233,43 +166,44 @@ async fn concurrent_puts_same_expected_version_one_wins() {
 }
 
 #[tokio::test]
-async fn put_after_overwrite_with_different_storage_variant() {
+async fn put_overwrites_payload_bytes() {
     let store = MemManifestStore::new();
 
-    let m1 = make_turbolite_manifest("node-1", 1);
+    let mut m1 = make_manifest("node-1");
+    m1.payload = b"first".to_vec();
     store.put("db1", &m1, None).await.unwrap();
 
-    let m2 = make_walrust_manifest("node-1", 2);
+    let mut m2 = make_manifest("node-1");
+    m2.payload = b"second".to_vec();
     let res = store.put("db1", &m2, Some(1)).await.unwrap();
     assert!(res.success);
 
     let fetched = store.get("db1").await.unwrap().unwrap();
-    assert!(matches!(fetched.storage, Backend::Walrust { .. }));
+    assert_eq!(fetched.payload, b"second");
     assert_eq!(fetched.version, 2);
 }
 
 #[tokio::test]
 async fn meta_updates_after_put() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
     store.put("db1", &m, None).await.unwrap();
 
     let meta1 = store.meta("db1").await.unwrap().unwrap();
     assert_eq!(meta1.version, 1);
 
-    let m2 = make_turbolite_manifest("node-2", 3);
+    let m2 = make_manifest("node-2");
     store.put("db1", &m2, Some(1)).await.unwrap();
 
     let meta2 = store.meta("db1").await.unwrap().unwrap();
     assert_eq!(meta2.version, 2);
     assert_eq!(meta2.writer_id, "node-2");
-    assert_eq!(meta2.lease_epoch, 3);
 }
 
 #[tokio::test]
 async fn cas_after_delete_allows_recreate() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
 
     let res = store.put("db1", &m, None).await.unwrap();
     assert!(res.success);
@@ -291,11 +225,11 @@ async fn multiple_keys_are_independent() {
     let store = MemManifestStore::new();
 
     store
-        .put("db1", &make_turbolite_manifest("node-1", 1), None)
+        .put("db1", &make_manifest("node-1"), None)
         .await
         .unwrap();
     store
-        .put("db2", &make_walrust_manifest("node-2", 2), None)
+        .put("db2", &make_manifest("node-2"), None)
         .await
         .unwrap();
 
@@ -304,8 +238,6 @@ async fn multiple_keys_are_independent() {
 
     assert_eq!(m1.writer_id, "node-1");
     assert_eq!(m2.writer_id, "node-2");
-    assert!(matches!(m1.storage, Backend::Turbolite { .. }));
-    assert!(matches!(m2.storage, Backend::Walrust { .. }));
 }
 
 // ============================================================================
@@ -318,15 +250,8 @@ async fn empty_string_writer_id_and_key() {
     let m = Manifest {
         version: 0,
         writer_id: "".to_string(),
-        lease_epoch: 0,
         timestamp_ms: 0,
-        storage: Backend::Walrust {
-            txid: 0,
-            changeset_prefix: "".to_string(),
-            latest_changeset_key: "".to_string(),
-            snapshot_key: None,
-            snapshot_txid: None,
-        },
+        payload: Vec::new(),
     };
 
     let res = store.put("", &m, None).await.unwrap();
@@ -334,8 +259,8 @@ async fn empty_string_writer_id_and_key() {
 
     let fetched = store.get("").await.unwrap().unwrap();
     assert_eq!(fetched.writer_id, "");
-    assert_eq!(fetched.lease_epoch, 0);
     assert_eq!(fetched.timestamp_ms, 0);
+    assert!(fetched.payload.is_empty());
 }
 
 // ============================================================================
@@ -348,15 +273,8 @@ async fn put_ignores_caller_version_on_create() {
     let m = Manifest {
         version: 999,
         writer_id: "node-1".to_string(),
-        lease_epoch: 1,
         timestamp_ms: 1000,
-        storage: Backend::Walrust {
-            txid: 1,
-            changeset_prefix: "cs/".to_string(),
-            latest_changeset_key: "cs/1".to_string(),
-            snapshot_key: None,
-            snapshot_txid: None,
-        },
+        payload: b"test-payload".to_vec(),
     };
     store.put("db1", &m, None).await.unwrap();
     let fetched = store.get("db1").await.unwrap().unwrap();
@@ -366,21 +284,14 @@ async fn put_ignores_caller_version_on_create() {
 #[tokio::test]
 async fn put_ignores_caller_version_on_update() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
     store.put("db1", &m, None).await.unwrap();
 
     let m2 = Manifest {
         version: 500,
         writer_id: "node-1".to_string(),
-        lease_epoch: 1,
         timestamp_ms: 2000,
-        storage: Backend::Walrust {
-            txid: 2,
-            changeset_prefix: "cs/".to_string(),
-            latest_changeset_key: "cs/2".to_string(),
-            snapshot_key: None,
-            snapshot_txid: None,
-        },
+        payload: b"test-payload-2".to_vec(),
     };
     store.put("db1", &m2, Some(1)).await.unwrap();
     let fetched = store.get("db1").await.unwrap().unwrap();
@@ -390,7 +301,7 @@ async fn put_ignores_caller_version_on_update() {
 #[tokio::test]
 async fn put_expected_version_zero_on_empty_store_fails() {
     let store = MemManifestStore::new();
-    let m = make_turbolite_manifest("node-1", 1);
+    let m = make_manifest("node-1");
     let res = store.put("db1", &m, Some(0)).await.unwrap();
     assert!(!res.success);
 }

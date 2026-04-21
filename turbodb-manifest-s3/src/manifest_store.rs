@@ -1,8 +1,8 @@
 //! S3ManifestStore: ManifestStore implementation using S3 conditional PUTs.
 //!
 //! Stores the full `Manifest` as msgpack in the S3 object body. Stores
-//! version, writer_id, and lease_epoch in S3 custom metadata headers so
-//! that `meta()` can use HeadObject without downloading the body.
+//! version and writer_id in S3 custom metadata headers so that `meta()`
+//! can use HeadObject without downloading the body.
 //!
 //! CAS uses S3 ETag conditional writes (If-Match / If-None-Match). The
 //! manifest version is managed client-side; ETag prevents races.
@@ -18,13 +18,12 @@ use crate::error::{is_not_found, is_precondition_failed};
 
 const META_VERSION: &str = "manifest-version";
 const META_WRITER_ID: &str = "manifest-writer-id";
-const META_LEASE_EPOCH: &str = "manifest-lease-epoch";
 
 /// ManifestStore backed by S3 conditional PUTs.
 ///
 /// - `get`: GetObject, deserialize msgpack body
 /// - `put`: PutObject with custom metadata headers, If-Match / If-None-Match for CAS
-/// - `meta`: HeadObject, read version/writer_id/lease_epoch from metadata headers
+/// - `meta`: HeadObject, read version/writer_id from metadata headers
 pub struct S3ManifestStore {
     client: aws_sdk_s3::Client,
     bucket: String,
@@ -84,7 +83,6 @@ impl ManifestStore for S3ManifestStore {
         let metadata: HashMap<String, String> = HashMap::from([
             (META_VERSION.to_string(), new_version.to_string()),
             (META_WRITER_ID.to_string(), stored.writer_id.clone()),
-            (META_LEASE_EPOCH.to_string(), stored.lease_epoch.to_string()),
         ]);
 
         match expected_version {
@@ -208,16 +206,9 @@ impl ManifestStore for S3ManifestStore {
                     .ok_or_else(|| anyhow!("missing {} header", META_WRITER_ID))?
                     .clone();
 
-                let lease_epoch = metadata
-                    .get(META_LEASE_EPOCH)
-                    .ok_or_else(|| anyhow!("missing {} header", META_LEASE_EPOCH))?
-                    .parse::<u64>()
-                    .map_err(|e| anyhow!("invalid {} header: {}", META_LEASE_EPOCH, e))?;
-
                 Ok(Some(ManifestMeta {
                     version,
                     writer_id,
-                    lease_epoch,
                 }))
             }
             Err(e) => {
@@ -234,58 +225,13 @@ impl ManifestStore for S3ManifestStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use turbodb::{BTreeManifestEntry, Backend, FrameEntry};
 
-    fn make_manifest(writer: &str, epoch: u64) -> Manifest {
+    fn make_manifest(writer: &str) -> Manifest {
         Manifest {
             version: 0,
             writer_id: writer.to_string(),
-            lease_epoch: epoch,
             timestamp_ms: 1000,
-            storage: Backend::Walrust {
-                txid: 1,
-                changeset_prefix: "cs/".to_string(),
-                latest_changeset_key: "cs/1".to_string(),
-                snapshot_key: None,
-                snapshot_txid: None,
-            },
-        }
-    }
-
-    fn make_turbolite_manifest(writer: &str, epoch: u64) -> Manifest {
-        Manifest {
-            version: 0,
-            writer_id: writer.to_string(),
-            lease_epoch: epoch,
-            timestamp_ms: 2000,
-            storage: Backend::Turbolite {
-                page_count: 100,
-                page_size: 4096,
-                pages_per_group: 256,
-                sub_pages_per_frame: 16,
-                strategy: "Positional".to_string(),
-                page_group_keys: vec!["pg-0".to_string()],
-                frame_tables: vec![vec![FrameEntry {
-                    offset: 0,
-                    len: 4096,
-                    page_count: 0,
-                }]],
-                group_pages: vec![vec![1, 2, 3]],
-                btrees: BTreeMap::from([(
-                    1,
-                    BTreeManifestEntry {
-                        name: "sqlite_master".to_string(),
-                        obj_type: "table".to_string(),
-                        group_ids: vec![0, 1],
-                    },
-                )]),
-                interior_chunk_keys: BTreeMap::from([(0, "ic-0".to_string())]),
-                index_chunk_keys: BTreeMap::from([(0, "idx-0".to_string())]),
-                subframe_overrides: vec![BTreeMap::new()],
-                turbolite_version: 0,
-                db_header: None,
-            },
+            payload: b"test-payload".to_vec(),
         }
     }
 
@@ -369,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn test_put_create_and_get() {
         let f = TestFixture::new().await;
-        let m = make_manifest("node-1", 1);
+        let m = make_manifest("node-1");
         let key = f.key("db1");
 
         let res = f.put(&key, &m, None).await.unwrap();
@@ -379,35 +325,8 @@ mod tests {
         let fetched = f.get(&key).await.unwrap().expect("should exist");
         assert_eq!(fetched.version, 1);
         assert_eq!(fetched.writer_id, "node-1");
-        assert_eq!(fetched.lease_epoch, 1);
         assert_eq!(fetched.timestamp_ms, 1000);
-        assert!(matches!(fetched.storage, Backend::Walrust { .. }));
-        f.cleanup().await;
-    }
-
-    #[tokio::test]
-    async fn test_put_create_turbolite_roundtrip() {
-        let f = TestFixture::new().await;
-        let m = make_turbolite_manifest("node-1", 1);
-        let key = f.key("db-turbo");
-
-        f.put(&key, &m, None).await.unwrap();
-        let fetched = f.get(&key).await.unwrap().expect("should exist");
-        match &fetched.storage {
-            Backend::Turbolite {
-                page_count,
-                page_size,
-                page_group_keys,
-                frame_tables,
-                ..
-            } => {
-                assert_eq!(*page_count, 100);
-                assert_eq!(*page_size, 4096);
-                assert_eq!(page_group_keys, &vec!["pg-0".to_string()]);
-                assert_eq!(frame_tables.len(), 1);
-            }
-            _ => panic!("expected Turbolite"),
-        }
+        assert_eq!(fetched.payload, b"test-payload");
         f.cleanup().await;
     }
 
@@ -416,14 +335,13 @@ mod tests {
         let f = TestFixture::new().await;
         let key = f.key("db1");
 
-        f.put(&key, &make_manifest("node-1", 1), None).await.unwrap();
+        f.put(&key, &make_manifest("node-1"), None).await.unwrap();
 
-        let res = f.put(&key, &make_manifest("node-1", 2), Some(1)).await.unwrap();
+        let res = f.put(&key, &make_manifest("node-1"), Some(1)).await.unwrap();
         assert!(res.success);
 
         let fetched = f.get(&key).await.unwrap().expect("should exist");
         assert_eq!(fetched.version, 2);
-        assert_eq!(fetched.lease_epoch, 2);
         f.cleanup().await;
     }
 
@@ -432,12 +350,11 @@ mod tests {
         let f = TestFixture::new().await;
         let key = f.key("db1");
 
-        f.put(&key, &make_manifest("node-42", 7), None).await.unwrap();
+        f.put(&key, &make_manifest("node-42"), None).await.unwrap();
 
         let meta = f.meta(&key).await.unwrap().expect("should exist");
         assert_eq!(meta.version, 1);
         assert_eq!(meta.writer_id, "node-42");
-        assert_eq!(meta.lease_epoch, 7);
         f.cleanup().await;
     }
 
@@ -454,10 +371,10 @@ mod tests {
         let f = TestFixture::new().await;
         let key = f.key("db1");
 
-        let first = f.put(&key, &make_manifest("node-1", 1), None).await.unwrap();
+        let first = f.put(&key, &make_manifest("node-1"), None).await.unwrap();
         assert!(first.success);
 
-        let second = f.put(&key, &make_manifest("node-2", 1), None).await.unwrap();
+        let second = f.put(&key, &make_manifest("node-2"), None).await.unwrap();
         assert!(!second.success);
         f.cleanup().await;
     }
@@ -467,10 +384,10 @@ mod tests {
         let f = TestFixture::new().await;
         let key = f.key("db1");
 
-        f.put(&key, &make_manifest("node-1", 1), None).await.unwrap();
-        f.put(&key, &make_manifest("node-1", 1), Some(1)).await.unwrap();
+        f.put(&key, &make_manifest("node-1"), None).await.unwrap();
+        f.put(&key, &make_manifest("node-1"), Some(1)).await.unwrap();
 
-        let res = f.put(&key, &make_manifest("node-1", 1), Some(1)).await.unwrap();
+        let res = f.put(&key, &make_manifest("node-1"), Some(1)).await.unwrap();
         assert!(!res.success);
         f.cleanup().await;
     }
@@ -480,7 +397,7 @@ mod tests {
         let f = TestFixture::new().await;
         let key = f.key("db1");
 
-        let res = f.put(&key, &make_manifest("node-1", 1), Some(1)).await.unwrap();
+        let res = f.put(&key, &make_manifest("node-1"), Some(1)).await.unwrap();
         assert!(!res.success);
         f.cleanup().await;
     }
@@ -490,13 +407,13 @@ mod tests {
         let f = TestFixture::new().await;
         let key = f.key("db1");
 
-        f.put(&key, &make_manifest("node-1", 1), None).await.unwrap();
+        f.put(&key, &make_manifest("node-1"), None).await.unwrap();
         assert_eq!(f.get(&key).await.unwrap().unwrap().version, 1);
 
-        f.put(&key, &make_manifest("node-1", 1), Some(1)).await.unwrap();
+        f.put(&key, &make_manifest("node-1"), Some(1)).await.unwrap();
         assert_eq!(f.get(&key).await.unwrap().unwrap().version, 2);
 
-        f.put(&key, &make_manifest("node-1", 1), Some(2)).await.unwrap();
+        f.put(&key, &make_manifest("node-1"), Some(2)).await.unwrap();
         assert_eq!(f.get(&key).await.unwrap().unwrap().version, 3);
         f.cleanup().await;
     }
@@ -506,16 +423,15 @@ mod tests {
         let f = TestFixture::new().await;
         let key = f.key("db1");
 
-        f.put(&key, &make_manifest("node-1", 1), None).await.unwrap();
+        f.put(&key, &make_manifest("node-1"), None).await.unwrap();
         let meta1 = f.meta(&key).await.unwrap().unwrap();
         assert_eq!(meta1.version, 1);
         assert_eq!(meta1.writer_id, "node-1");
 
-        f.put(&key, &make_manifest("node-2", 5), Some(1)).await.unwrap();
+        f.put(&key, &make_manifest("node-2"), Some(1)).await.unwrap();
         let meta2 = f.meta(&key).await.unwrap().unwrap();
         assert_eq!(meta2.version, 2);
         assert_eq!(meta2.writer_id, "node-2");
-        assert_eq!(meta2.lease_epoch, 5);
         f.cleanup().await;
     }
 
@@ -525,15 +441,13 @@ mod tests {
         let k1 = f.key("db1");
         let k2 = f.key("db2");
 
-        f.put(&k1, &make_manifest("node-1", 1), None).await.unwrap();
-        f.put(&k2, &make_turbolite_manifest("node-2", 2), None).await.unwrap();
+        f.put(&k1, &make_manifest("node-1"), None).await.unwrap();
+        f.put(&k2, &make_manifest("node-2"), None).await.unwrap();
 
         let m1 = f.get(&k1).await.unwrap().unwrap();
         let m2 = f.get(&k2).await.unwrap().unwrap();
         assert_eq!(m1.writer_id, "node-1");
         assert_eq!(m2.writer_id, "node-2");
-        assert!(matches!(m1.storage, Backend::Walrust { .. }));
-        assert!(matches!(m2.storage, Backend::Turbolite { .. }));
         f.cleanup().await;
     }
 
@@ -542,7 +456,7 @@ mod tests {
         let f = TestFixture::new().await;
         let key = f.key("db1");
 
-        let mut m = make_manifest("node-1", 1);
+        let mut m = make_manifest("node-1");
         m.version = 999;
         f.put(&key, &m, None).await.unwrap();
 
