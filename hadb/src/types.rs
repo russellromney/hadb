@@ -19,17 +19,30 @@ pub enum HaMode {
     Shared,
 }
 
-/// How data is made durable between writes.
+/// hadb's sole durability lever: how the Replicator ships the change log
+/// (walrust WAL frames, graphstream journal entries, anything else) to the
+/// replication target. Pure replication axis — hadb has no notion of
+/// tiering, page groups, or checkpoints. Consumers that tier (turbolite,
+/// turbograph) layer their own policy on top via `turbodb::Durability`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Durability {
-    /// Replication log shipping (walrust WAL / graphstream journal). RPO = sync_interval.
-    Replicated,
-    /// Page-level S3 tiering (turbolite / turbograph S3Primary). RPO = 0.
-    Synchronous,
-    /// Hybrid: page-level S3 base state + replication log deltas between checkpoints.
-    /// Combines Synchronous durability with Replicated catch-up speed.
-    /// Used by haqlite (turbolite + walrust) for the best of both worlds.
-    Eventual,
+    /// Replicator is either absent or its ship loop is disabled.
+    /// The log stays local; durability comes from the caller's storage
+    /// engine (SQLite WAL on local disk, etc). RPO at the log layer = ∞.
+    /// Used by `turbodb::Durability::{Checkpoint, Cloud}` — the first
+    /// because nothing ships, the second because per-commit page writes
+    /// already cover replication.
+    Local,
+
+    /// Replicator ships on the given interval. Idle ticks are no-ops
+    /// (nothing new to ship → nothing goes out). Default for plain hadb
+    /// consumers; also what `turbodb::Durability::Continuous` composes to.
+    Replicated(Duration),
+
+    /// Replicator ships synchronously per commit. RPO at the log layer = 0.
+    /// Rare — most consumers that want RPO=0 pick `turbodb::Durability::Cloud`
+    /// (page-level per-commit) instead of log-level sync shipping.
+    SyncReplicated,
 }
 
 impl Default for HaMode {
@@ -37,7 +50,7 @@ impl Default for HaMode {
 }
 
 impl Default for Durability {
-    fn default() -> Self { Durability::Replicated }
+    fn default() -> Self { Durability::Replicated(Duration::from_secs(1)) }
 }
 
 impl std::fmt::Display for HaMode {
@@ -52,9 +65,9 @@ impl std::fmt::Display for HaMode {
 impl std::fmt::Display for Durability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Durability::Replicated => write!(f, "Replicated"),
-            Durability::Synchronous => write!(f, "Synchronous"),
-            Durability::Eventual => write!(f, "Eventual"),
+            Durability::Local => write!(f, "Local"),
+            Durability::Replicated(d) => write!(f, "Replicated({}ms)", d.as_millis()),
+            Durability::SyncReplicated => write!(f, "SyncReplicated"),
         }
     }
 }
@@ -62,23 +75,23 @@ impl std::fmt::Display for Durability {
 /// Validate a mode + durability combination.
 ///
 /// Valid combinations:
-/// - Dedicated + Replicated (journal shipping, RPO = sync_interval)
-/// - Dedicated + Synchronous (S3Primary, RPO = 0)
-/// - Dedicated + Eventual (S3Primary base + journal deltas)
-/// - Shared + Synchronous (lease-per-write, RPO = 0)
+/// - Dedicated + Local → OK
+/// - Dedicated + Replicated(_) → OK
+/// - Dedicated + SyncReplicated → OK
+/// - Shared + Local → OK (multi-writer + per-commit-page-writes is valid)
 ///
 /// Invalid:
-/// - Shared + Replicated: multiwriter + eventual = writes on stale data
-/// - Shared + Eventual: same problem (journal deltas don't serialize)
+/// - Shared + Replicated(_): multiwriter + async log shipping diverges silently
+/// - Shared + SyncReplicated: no lease-per-commit mechanism, still a race
 pub fn validate_mode_durability(mode: HaMode, durability: Durability) -> Result<(), String> {
     match (mode, durability) {
         (HaMode::Dedicated, _) => Ok(()),
-        (HaMode::Shared, Durability::Synchronous) => Ok(()),
-        (HaMode::Shared, Durability::Replicated) => {
-            Err("Shared mode requires Synchronous durability (Shared+Replicated is invalid: multiwriter + eventual = writes on stale data)".to_string())
+        (HaMode::Shared, Durability::Local) => Ok(()),
+        (HaMode::Shared, Durability::Replicated(_)) => {
+            Err("multi-writer + async log shipping diverges silently across writers".to_string())
         }
-        (HaMode::Shared, Durability::Eventual) => {
-            Err("Shared mode requires Synchronous durability (Shared+Eventual is invalid: journal deltas don't serialize across writers)".to_string())
+        (HaMode::Shared, Durability::SyncReplicated) => {
+            Err("multi-writer + sync log shipping without a lease-per-commit mechanism is still a race — use turbodb::Durability::Cloud".to_string())
         }
     }
 }
@@ -207,8 +220,9 @@ impl std::fmt::Debug for LeaseConfig {
 /// Top-level configuration for the Coordinator.
 #[derive(Debug, Clone)]
 pub struct CoordinatorConfig {
-    /// Replication sync interval. Default: 1s.
-    pub sync_interval: Duration,
+    /// Replication durability mode. Default: `Durability::Replicated(1s)`.
+    /// Carries the sync interval for `Replicated` variant.
+    pub durability: Durability,
     /// Snapshot interval. Default: 1h.
     pub snapshot_interval: Duration,
     /// Lease config. None = no leases, always Leader (single-node mode).
@@ -233,7 +247,7 @@ pub struct CoordinatorConfig {
 impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
-            sync_interval: Duration::from_secs(1),
+            durability: Durability::default(),
             snapshot_interval: Duration::from_secs(3600),
             lease: None,
             follower_pull_interval: Duration::from_secs(1),
@@ -373,7 +387,7 @@ mod tests {
     fn test_coordinator_config_default() {
         let config = CoordinatorConfig::default();
 
-        assert_eq!(config.sync_interval, Duration::from_secs(1));
+        assert_eq!(config.durability, Durability::Replicated(Duration::from_secs(1)));
         assert_eq!(config.snapshot_interval, Duration::from_secs(3600));
         assert!(config.lease.is_none());
         assert_eq!(config.follower_pull_interval, Duration::from_secs(1));
@@ -394,12 +408,12 @@ mod tests {
     #[test]
     fn test_coordinator_config_custom() {
         let mut config = CoordinatorConfig::default();
-        config.sync_interval = Duration::from_secs(5);
+        config.durability = Durability::Replicated(Duration::from_secs(5));
         config.snapshot_interval = Duration::from_secs(7200);
         config.follower_pull_interval = Duration::from_secs(2);
         config.replicator_timeout = Duration::from_secs(60);
 
-        assert_eq!(config.sync_interval, Duration::from_secs(5));
+        assert_eq!(config.durability, Durability::Replicated(Duration::from_secs(5)));
         assert_eq!(config.snapshot_interval, Duration::from_secs(7200));
         assert_eq!(config.follower_pull_interval, Duration::from_secs(2));
         assert_eq!(config.replicator_timeout, Duration::from_secs(60));

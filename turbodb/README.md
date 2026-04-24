@@ -43,6 +43,18 @@ Follower:                                 v
 
 The manifest is both the atomic commit point for tiered storage and the replication cursor for HA. hadb's lease determines who writes the manifest. turbodb's prefetch engine makes reads fast regardless of whether the local cache is warm.
 
+## Durability modes
+
+turbodb defines three user-facing durability presets. Each maps to a `(hadb replication, turbodb flush policy)` pair:
+
+| Mode | Pages reach cloud | WAL shipping | Use case |
+|------|-------------------|--------------|----------|
+| `Checkpoint` | on checkpoint only | none | Dev / single-node / tests |
+| `Continuous` | on checkpoint + WAL ships ~1s | yes | Production default |
+| `Cloud` | every commit, before ack | none | Multi-writer (Shared mode) |
+
+`Continuous` is the default. `Cloud` is required for `HaMode::Shared` because multiple writers need every write visible immediately. `Checkpoint` is best for local-only workloads where crash recovery from the last checkpoint is acceptable.
+
 ## Key concepts
 
 **Page groups.** Pages are grouped into fixed-size chunks (e.g., 2048 pages = 8MB). Each group is one immutable S3 object, zstd-compressed with seekable sub-frames for targeted range GETs.

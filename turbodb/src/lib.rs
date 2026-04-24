@@ -19,9 +19,11 @@
 //!
 //! [hadb/turbodb/SPEC.md]: https://github.com/russellromney/hadb/blob/main/turbodb/SPEC.md
 
+mod config;
 mod store;
 mod types;
 
+pub use config::{CheckpointConfig, Durability, FlushPolicy};
 pub use hadb_storage::CasResult;
 pub use store::ManifestStore;
 pub use types::{Manifest, ManifestMeta};
