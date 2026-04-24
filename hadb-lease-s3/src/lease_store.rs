@@ -77,6 +77,7 @@ impl LeaseStore for S3LeaseStore {
     }
 
     async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult> {
+        let data_for_fallback = data.clone();
         let result = self
             .client
             .put_object()
@@ -96,7 +97,46 @@ impl LeaseStore for S3LeaseStore {
                 success: false,
                 etag: None,
             }),
-            Err(e) => Err(anyhow!("S3 PutObject (if-none-match) failed: {}", e)),
+            Err(e) => {
+                tracing::debug!(
+                    "S3 PutObject (if-none-match) failed with {e}; trying HEAD+PUT fallback for S3-compatible stores"
+                );
+                match self
+                    .client
+                    .head_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                {
+                    Ok(_) => Ok(CasResult {
+                        success: false,
+                        etag: None,
+                    }),
+                    Err(head_err) if is_not_found(&head_err) => {
+                        match self
+                            .client
+                            .put_object()
+                            .bucket(&self.bucket)
+                            .key(key)
+                            .body(data_for_fallback.into())
+                            .send()
+                            .await
+                        {
+                            Ok(output) => Ok(CasResult {
+                                success: true,
+                                etag: output.e_tag().map(|s| s.to_string()),
+                            }),
+                            Err(put_err) => Err(anyhow!(
+                                "S3 PutObject (if-none-match) fallback PUT failed: {put_err}"
+                            )),
+                        }
+                    }
+                    Err(head_err) => Err(anyhow!(
+                        "S3 PutObject (if-none-match) fallback HEAD failed: {head_err}"
+                    )),
+                }
+            }
         }
     }
 

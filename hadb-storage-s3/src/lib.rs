@@ -317,6 +317,7 @@ impl StorageBackend for S3Storage {
         let full = self.full_key(key);
         let len = data.len() as u64;
         let mut attempt = 0u32;
+        let mut tried_fallback = false;
         loop {
             let body = ByteStream::from(data.to_vec());
             match self
@@ -337,12 +338,63 @@ impl StorageBackend for S3Storage {
                         etag: resp.e_tag().map(|s| s.to_string()),
                     });
                 }
-                // 412 is a CAS signal, not a transient error; return immediately.
                 Err(e) if is_precondition_failed(&e) => {
                     return Ok(CasResult {
                         success: false,
                         etag: None,
                     })
+                }
+                Err(e) if !tried_fallback => {
+                    tried_fallback = true;
+                    tracing::debug!(
+                        "S3 PUT-if-absent {full} failed with {e}; trying HEAD+PUT fallback for S3-compatible stores"
+                    );
+                    match self
+                        .client
+                        .head_object()
+                        .bucket(&self.bucket)
+                        .key(&full)
+                        .send()
+                        .await
+                    {
+                        Ok(_) => {
+                            return Ok(CasResult {
+                                success: false,
+                                etag: None,
+                            });
+                        }
+                        Err(head_err) if is_not_found(&head_err) => {
+                            let body = ByteStream::from(data.to_vec());
+                            match self
+                                .client
+                                .put_object()
+                                .bucket(&self.bucket)
+                                .key(&full)
+                                .body(body)
+                                .send()
+                                .await
+                            {
+                                Ok(resp) => {
+                                    self.put_count.fetch_add(1, Ordering::Relaxed);
+                                    self.put_bytes.fetch_add(len, Ordering::Relaxed);
+                                    return Ok(CasResult {
+                                        success: true,
+                                        etag: resp.e_tag().map(|s| s.to_string()),
+                                    });
+                                }
+                                Err(put_err) => {
+                                    return Err(anyhow!(
+                                        "S3 PUT-if-absent {full} fallback PUT failed: {put_err}"
+                                    ));
+                                }
+                            }
+                        }
+                        Err(head_err) => {
+                            return Err(anyhow!(
+                                "S3 PUT-if-absent {full} fallback HEAD failed: {head_err}"
+                            ));
+                        }
+                    }
                 }
                 Err(e) => {
                     attempt += 1;
