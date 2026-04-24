@@ -2,17 +2,26 @@
 members = [
     "hadb",
     "hadb-storage",
+    "hadb-storage-mem",
+    "hadb-storage-local",
+    "hadb-storage-s3",
+    "hadb-storage-cinch",
+    "hadb-lease",
+    "hadb-lease-mem",
     "hadb-io",
     "hadb-lease-s3",
     "hadb-lease-nats",
-    "hadb-lease-etcd",
-    "hadb-lease-http",
-    "hadb-manifest-s3",
-    "hadb-manifest-nats",
-    "hadb-manifest-etcd",
-    "hadb-manifest-redis",
-    "hadb-manifest-http",
+    "hadb-lease-cinch",
+    "hadb-changeset",
     "hadb-cli",
+    # turbodb: manifest layer (Phase Turbogenesis). Siblings of the hadb-*
+    # coordination crates; same workspace so they share lockfile + cache.
+    "turbodb",
+    "turbodb-manifest-mem",
+    "turbodb-manifest-s3",
+    "turbodb-manifest-cinch",
+    "turbodb-manifest-nats",
+    "turbodb-manifest-redis",
 ]
 resolver = "2"
 

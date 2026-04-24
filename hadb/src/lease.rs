@@ -1,35 +1,16 @@
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
 
 use crate::{LeaseStore, Role};
+use hadb_lease::AtomicFenceWriter;
 
-/// Lease data stored in LeaseStore (S3, etcd, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LeaseData {
-    pub instance_id: String,
-    /// Network address of the leader (for client discovery).
-    #[serde(default)]
-    pub address: String,
-    pub claimed_at: u64,
-    pub ttl_secs: u64,
-    /// Unique per leadership claim. Changes on every promotion, even if the same
-    /// instance reclaims. Clients poll for a new session_id after failures.
-    #[serde(default)]
-    pub session_id: String,
-    /// When true, the leader is shutting down gracefully (e.g., Fly scale-to-zero).
-    /// Followers should call on_sleep and exit rather than promote.
-    #[serde(default)]
-    pub sleeping: bool,
-}
-
-impl LeaseData {
-    /// Whether this lease has expired based on current time.
-    pub fn is_expired(&self) -> bool {
-        let now = chrono::Utc::now().timestamp() as u64;
-        now >= self.claimed_at + self.ttl_secs
-    }
-}
+// Phase Shoal: `LeaseData` now lives in the `hadb-lease` trait crate so
+// every `LeaseStore` impl + every lease-aware client (embedded
+// replicas, cinch's lease orchestrator, ...) can agree on the on-wire
+// shape without depending on the full `hadb` coordinator crate.
+// Re-exported for back-compat so existing imports (`hadb::LeaseData`,
+// `haqlite::LeaseData`) keep working.
+pub use hadb_lease::LeaseData;
 
 /// Per-database CAS lease manager.
 ///
@@ -45,10 +26,10 @@ pub struct DbLease {
     current_etag: Option<String>,
     /// Generated fresh on every new claim (not renewal).
     session_id: String,
-    /// Shared fence token, updated on every successful claim/renew.
-    /// Storage clients read this to include Fence-Token on writes.
-    /// None = no external observer (backward compat).
-    fence_token: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Exclusive writer side of the fence. The paired `AtomicFence` is the
+    /// reader that storage adapters hold. `None` = no external observer
+    /// (tests and single-writer deployments that don't fence).
+    fence_writer: Option<Arc<AtomicFenceWriter>>,
 }
 
 impl DbLease {
@@ -72,30 +53,50 @@ impl DbLease {
             ttl_secs,
             current_etag: None,
             session_id: uuid::Uuid::new_v4().to_string(),
-            fence_token: None,
+            fence_writer: None,
         }
     }
 
-    /// Set a shared fence token that gets updated on every successful
-    /// lease claim/renew. Storage clients use this for Fence-Token headers.
-    pub fn with_fence_token(mut self, token: Arc<std::sync::atomic::AtomicU64>) -> Self {
-        self.fence_token = Some(token);
+    /// Attach the writer half of an `AtomicFence`. Callers pair this with
+    /// an `AtomicFence` reader handed to every storage adapter that needs
+    /// fenced writes.
+    pub fn with_fence_writer(mut self, writer: Arc<AtomicFenceWriter>) -> Self {
+        self.fence_writer = Some(writer);
         self
     }
 
-    /// Update the shared fence token from the current etag.
+    /// Publish the current etag (parsed as a `u64` lease revision) into
+    /// the fence. No-op if no writer was attached.
+    ///
+    /// If a writer *is* attached but the etag doesn't parse as `u64`, we
+    /// clear the fence and log. Letting it silently skip the update would
+    /// leave a stale revision in place while the lease believes itself
+    /// fresh -- the writer then issues fenced writes with a revision the
+    /// server has long superseded and gets confusing "former leader"
+    /// rejections. This is the "no silent failures" rule: either the
+    /// lease backend produces u64 etags (Cinch, NATS KV) or the caller
+    /// should not attach a fence_writer.
     fn update_fence_token(&self) {
-        if let (Some(ref fence), Some(ref etag)) = (&self.fence_token, &self.current_etag) {
-            if let Ok(rev) = etag.parse::<u64>() {
-                fence.store(rev, std::sync::atomic::Ordering::SeqCst);
+        if let (Some(ref writer), Some(ref etag)) = (&self.fence_writer, &self.current_etag) {
+            match etag.parse::<u64>() {
+                Ok(rev) => writer.set(rev),
+                Err(_) => {
+                    tracing::error!(
+                        lease_key = %self.lease_key,
+                        etag = %etag,
+                        "DbLease has a fence_writer but the lease store returned a non-u64 etag; \
+                         clearing fence to force writes to fail fast rather than carry a stale revision"
+                    );
+                    writer.clear();
+                }
             }
         }
     }
 
-    /// Clear the shared fence token (lease lost).
+    /// Clear the fence (lease lost). No-op if no writer was attached.
     fn clear_fence_token(&self) {
-        if let Some(ref fence) = self.fence_token {
-            fence.store(0, std::sync::atomic::Ordering::SeqCst);
+        if let Some(ref writer) = self.fence_writer {
+            writer.clear();
         }
     }
 
@@ -278,92 +279,10 @@ impl DbLease {
     }
 }
 
-// ============================================================================
-// InMemoryLeaseStore — for testing without S3
-// ============================================================================
-
-/// In-memory lease store for testing.
-///
-/// Thread-safe via `std::sync::Mutex` (held briefly, never across await points).
-/// Use this in unit/integration tests instead of requiring real S3.
-pub struct InMemoryLeaseStore {
-    leases: std::sync::Mutex<std::collections::HashMap<String, (Vec<u8>, String)>>,
-    /// Monotonically increasing revision counter (matches NATS KV behavior).
-    revision: std::sync::atomic::AtomicU64,
-}
-
-impl InMemoryLeaseStore {
-    pub fn new() -> Self {
-        Self {
-            leases: std::sync::Mutex::new(std::collections::HashMap::new()),
-            revision: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-
-    fn next_revision(&self) -> String {
-        self.revision.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            .wrapping_add(1)
-            .to_string()
-    }
-}
-
-impl Default for InMemoryLeaseStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::LeaseStore for InMemoryLeaseStore {
-    async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
-        Ok(self.leases.lock().unwrap().get(key).cloned())
-    }
-
-    async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<crate::CasResult> {
-        let mut leases = self.leases.lock().unwrap();
-        if leases.contains_key(key) {
-            Ok(crate::CasResult {
-                success: false,
-                etag: None,
-            })
-        } else {
-            let etag = self.next_revision();
-            leases.insert(key.to_string(), (data, etag.clone()));
-            Ok(crate::CasResult {
-                success: true,
-                etag: Some(etag),
-            })
-        }
-    }
-
-    async fn write_if_match(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        expected_etag: &str,
-    ) -> Result<crate::CasResult> {
-        let mut leases = self.leases.lock().unwrap();
-        match leases.get(key) {
-            Some((_, current_etag)) if current_etag == expected_etag => {
-                let new_etag = self.next_revision();
-                leases.insert(key.to_string(), (data, new_etag.clone()));
-                Ok(crate::CasResult {
-                    success: true,
-                    etag: Some(new_etag),
-                })
-            }
-            _ => Ok(crate::CasResult {
-                success: false,
-                etag: None,
-            }),
-        }
-    }
-
-    async fn delete(&self, key: &str) -> Result<()> {
-        self.leases.lock().unwrap().remove(key);
-        Ok(())
-    }
-}
+// InMemoryLeaseStore lives in `hadb-lease-mem` now; re-exported from this
+// crate for backwards-compatibility with callers that did
+// `use hadb::InMemoryLeaseStore`.
+pub use hadb_lease_mem::InMemoryLeaseStore;
 
 #[cfg(test)]
 mod tests {
@@ -440,60 +359,6 @@ mod tests {
             store.remove(key);
             Ok(())
         }
-    }
-
-    // ========================================================================
-    // LeaseData tests
-    // ========================================================================
-
-    #[test]
-    fn test_lease_data_not_expired() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let lease = LeaseData {
-            instance_id: "test".to_string(),
-            address: "localhost:8080".to_string(),
-            claimed_at: now,
-            ttl_secs: 60,
-            session_id: "session-1".to_string(),
-            sleeping: false,
-        };
-        assert!(!lease.is_expired());
-    }
-
-    #[test]
-    fn test_lease_data_expired() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let lease = LeaseData {
-            instance_id: "test".to_string(),
-            address: "localhost:8080".to_string(),
-            claimed_at: now.saturating_sub(120), // 120 seconds ago
-            ttl_secs: 60,
-            session_id: "session-1".to_string(),
-            sleeping: false,
-        };
-        assert!(lease.is_expired());
-    }
-
-    #[test]
-    fn test_lease_data_serialization() {
-        let lease = LeaseData {
-            instance_id: "test-instance".to_string(),
-            address: "localhost:9000".to_string(),
-            claimed_at: 1234567890,
-            ttl_secs: 30,
-            session_id: "session-abc".to_string(),
-            sleeping: true,
-        };
-
-        let json = serde_json::to_string(&lease).unwrap();
-        let deserialized: LeaseData = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(deserialized.instance_id, "test-instance");
-        assert_eq!(deserialized.address, "localhost:9000");
-        assert_eq!(deserialized.claimed_at, 1234567890);
-        assert_eq!(deserialized.ttl_secs, 30);
-        assert_eq!(deserialized.session_id, "session-abc");
-        assert!(deserialized.sleeping);
     }
 
     // ========================================================================
@@ -867,99 +732,197 @@ mod tests {
     // Fence token integration
     // ========================================================================
 
+    use hadb_lease::AtomicFence;
+
     #[tokio::test]
     async fn test_fence_token_updated_on_claim() {
         let store = Arc::new(InMemoryLeaseStore::new());
-        let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (fence, writer) = AtomicFence::new();
 
         let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
-            .with_fence_token(fence.clone());
+            .with_fence_writer(Arc::new(writer));
 
-        assert_eq!(fence.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(fence.current().is_none());
 
         let role = lease.try_claim().await.unwrap();
         assert_eq!(role, Role::Leader);
 
-        // Fence should be updated to a non-zero value
-        let fence_val = fence.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(fence_val > 0, "fence should be set after claim, got {}", fence_val);
+        let fence_val = fence.current().expect("fence should be set after claim");
+        assert!(fence_val > 0, "fence revision must be > 0, got {fence_val}");
     }
 
     #[tokio::test]
     async fn test_fence_token_updated_on_renew() {
         let store = Arc::new(InMemoryLeaseStore::new());
-        let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (fence, writer) = AtomicFence::new();
 
         let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
-            .with_fence_token(fence.clone());
+            .with_fence_writer(Arc::new(writer));
 
         lease.try_claim().await.unwrap();
-        let fence_after_claim = fence.load(std::sync::atomic::Ordering::SeqCst);
+        let fence_after_claim = fence.current().expect("fence set after claim");
 
         lease.renew().await.unwrap();
-        let fence_after_renew = fence.load(std::sync::atomic::Ordering::SeqCst);
+        let fence_after_renew = fence.current().expect("fence set after renew");
 
-        // Fence should change on renew (new revision)
-        assert!(fence_after_renew > fence_after_claim,
-            "fence should increase on renew: {} -> {}", fence_after_claim, fence_after_renew);
+        assert!(
+            fence_after_renew > fence_after_claim,
+            "fence should increase on renew: {fence_after_claim} -> {fence_after_renew}",
+        );
     }
 
     #[tokio::test]
     async fn test_fence_token_cleared_on_release() {
         let store = Arc::new(InMemoryLeaseStore::new());
-        let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (fence, writer) = AtomicFence::new();
 
         let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
-            .with_fence_token(fence.clone());
+            .with_fence_writer(Arc::new(writer));
 
         lease.try_claim().await.unwrap();
-        assert!(fence.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(fence.current().is_some());
 
         lease.release().await.unwrap();
-        assert_eq!(fence.load(std::sync::atomic::Ordering::SeqCst), 0, "fence should be cleared on release");
+        assert!(fence.current().is_none(), "fence should be cleared on release");
     }
 
     #[tokio::test]
     async fn test_fence_token_cleared_on_renewal_failure() {
         let store = Arc::new(InMemoryLeaseStore::new());
-        let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (fence, writer) = AtomicFence::new();
 
         let mut lease1 = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60)
-            .with_fence_token(fence.clone());
+            .with_fence_writer(Arc::new(writer));
         let mut lease2 = DbLease::new(store, "db1/_lease.json", "inst-2", "addr-2", 60);
 
-        // inst-1 claims
         lease1.try_claim().await.unwrap();
-        assert!(fence.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(fence.current().is_some());
 
-        // inst-2 steals (simulate by deleting and re-claiming)
         lease1.release().await.unwrap();
         lease2.try_claim().await.unwrap();
 
-        // inst-1 tries to renew with stale etag -- should fail
-        // (current_etag is None after release, so renew will error)
-        // Instead, reclaim and let inst-2's claim make inst-1's etag stale
-        // This is tricky to test with InMemoryLeaseStore since release deletes the key.
-        // The important thing is release cleared the fence:
-        assert_eq!(fence.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // inst-1's release cleared the fence. inst-2 has its own (unattached) lease.
+        assert!(fence.current().is_none());
     }
 
     #[tokio::test]
     async fn test_fence_token_updated_on_set_sleeping() {
         let store = Arc::new(InMemoryLeaseStore::new());
-        let fence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (fence, writer) = AtomicFence::new();
 
         let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
-            .with_fence_token(fence.clone());
+            .with_fence_writer(Arc::new(writer));
 
         lease.try_claim().await.unwrap();
-        let fence_after_claim = fence.load(std::sync::atomic::Ordering::SeqCst);
+        let fence_after_claim = fence.current().expect("fence set after claim");
 
         lease.set_sleeping().await.unwrap();
-        let fence_after_sleeping = fence.load(std::sync::atomic::Ordering::SeqCst);
+        let fence_after_sleeping = fence.current().expect("fence set after sleeping");
 
-        // Fence should change (new revision from CAS write)
-        assert!(fence_after_sleeping > fence_after_claim,
-            "fence should increase on set_sleeping: {} -> {}", fence_after_claim, fence_after_sleeping);
+        assert!(
+            fence_after_sleeping > fence_after_claim,
+            "fence should increase on set_sleeping: {fence_after_claim} -> {fence_after_sleeping}",
+        );
+    }
+
+    /// Lease store whose etags are opaque strings, not u64s. Models S3's
+    /// behaviour (quoted ETag hex) and any other backend that doesn't
+    /// produce numeric revisions.
+    struct OpaqueEtagStore {
+        data: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
+    }
+    impl OpaqueEtagStore {
+        fn new() -> Self {
+            Self {
+                data: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl LeaseStore for OpaqueEtagStore {
+        async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
+            Ok(self.data.lock().unwrap().get(key).cloned())
+        }
+        async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult> {
+            let mut store = self.data.lock().unwrap();
+            if store.contains_key(key) {
+                return Ok(CasResult { success: false, etag: None });
+            }
+            let etag = format!("\"{:x}\"", uuid::Uuid::new_v4().as_u128());
+            store.insert(key.to_string(), (data, etag.clone()));
+            Ok(CasResult { success: true, etag: Some(etag) })
+        }
+        async fn write_if_match(&self, key: &str, data: Vec<u8>, etag: &str) -> Result<CasResult> {
+            let mut store = self.data.lock().unwrap();
+            match store.get(key) {
+                Some((_, current)) if current == etag => {
+                    let new_etag = format!("\"{:x}\"", uuid::Uuid::new_v4().as_u128());
+                    store.insert(key.to_string(), (data, new_etag.clone()));
+                    Ok(CasResult { success: true, etag: Some(new_etag) })
+                }
+                _ => Ok(CasResult { success: false, etag: None }),
+            }
+        }
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.data.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    /// Phase Anvil i review fix: if `DbLease` is handed a `fence_writer` but
+    /// the lease store's etag isn't parseable as u64, the fence must be
+    /// CLEARED (not silently skipped). Carrying a stale revision while the
+    /// lease manager believes itself fresh is the "former leader writes"
+    /// data-corruption scenario. Failing fast (NoActiveLease) is the
+    /// correct outcome per CLAUDE.md "no silent failures".
+    #[tokio::test]
+    async fn test_fence_cleared_on_non_u64_etag() {
+        let store = Arc::new(OpaqueEtagStore::new());
+        let (fence, writer) = AtomicFence::new();
+
+        // Manually seed the writer so we can observe that it gets CLEARED
+        // rather than left at a stale value.
+        writer.set(42);
+        assert_eq!(fence.current(), Some(42), "preseeded fence is visible");
+
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
+            .with_fence_writer(Arc::new(writer));
+
+        let role = lease.try_claim().await.expect("claim");
+        assert_eq!(role, Role::Leader, "opaque-etag backend still supports CAS claim");
+
+        // The fence must now be None. The key invariant: downstream storage
+        // adapters calling `fence.require()` get `NoActiveLease` (write fails
+        // fast) instead of the stale `42` (write carries a revision the
+        // server will reject as former-leader). The old code left `42` here.
+        assert_eq!(
+            fence.current(),
+            None,
+            "fence must clear when the etag doesn't parse as u64; leaving a stale \
+             revision is the silent-failure bug the Anvil-i review fix closed"
+        );
+    }
+
+    /// Follow-up: renew doesn't restore the fence either; the opaque etag
+    /// keeps producing non-u64 values, so every write must keep failing.
+    /// Pins the contract that bad etags are terminal for fence-enforced
+    /// writes (rather than intermittent).
+    #[tokio::test]
+    async fn test_fence_stays_cleared_across_renew_with_opaque_etag() {
+        let store = Arc::new(OpaqueEtagStore::new());
+        let (fence, writer) = AtomicFence::new();
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
+            .with_fence_writer(Arc::new(writer));
+
+        lease.try_claim().await.unwrap();
+        assert_eq!(fence.current(), None, "first claim clears");
+
+        let renewed = lease.renew().await.unwrap();
+        assert!(renewed, "renew with valid etag succeeds");
+        assert_eq!(
+            fence.current(),
+            None,
+            "renew must keep fence cleared since etag is still opaque"
+        );
     }
 }

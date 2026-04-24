@@ -6,6 +6,21 @@ Reference implementations: [turbolite](https://github.com/russellromney/turbolit
 
 See [SPEC.md](SPEC.md) for the full implementation specification.
 
+## Rust crate family (in this workspace)
+
+The manifest envelope — `Manifest`, `ManifestMeta`, `ManifestStore` trait, and five backend impls — ships as `turbodb*` sibling crates under `hadb/`. The manifest's `payload` is an opaque `Vec<u8>`; its shape belongs to each consumer (turbolite, turbograph, future turboduck), keeping the abstraction open.
+
+| Crate | Purpose |
+|---|---|
+| `turbodb` | Trait crate. `Manifest` (opaque-payload envelope), `ManifestMeta`, `ManifestStore`. Depends on `hadb-storage` for `CasResult`. No impls. |
+| `turbodb-manifest-mem` | `MemManifestStore` — in-memory, test-only. |
+| `turbodb-manifest-s3` | `S3ManifestStore` — S3 conditional PUTs (If-Match / If-None-Match). |
+| `turbodb-manifest-cinch` | `CinchManifestStore` — Cinch's `/v1/sync/manifest` HTTP wire (Bearer auth + Fence-Token headers). |
+| `turbodb-manifest-nats` | `NatsManifestStore` — NATS JetStream KV with revision-based CAS. |
+| `turbodb-manifest-redis` | `RedisManifestStore` — Redis Lua-script CAS with hash-tagged version side-keys. |
+
+The turbolite / turbograph / turboduck reference implementations (the actual tiered-storage engines on top of turbodb's commit format) are separate repos.
+
 ## The idea
 
 Embedded databases store everything on local disk. That's fast, but local disk is expensive, sized for peak, and lost when the node dies. S3 is durable, cheap ($0.02/GB/month), and infinite, but too slow for random reads.
@@ -27,6 +42,18 @@ Follower:                                 v
 ```
 
 The manifest is both the atomic commit point for tiered storage and the replication cursor for HA. hadb's lease determines who writes the manifest. turbodb's prefetch engine makes reads fast regardless of whether the local cache is warm.
+
+## Durability modes
+
+turbodb defines three user-facing durability presets. Each maps to a `(hadb replication, turbodb flush policy)` pair:
+
+| Mode | Pages reach cloud | WAL shipping | Use case |
+|------|-------------------|--------------|----------|
+| `Checkpoint` | on checkpoint only | none | Dev / single-node / tests |
+| `Continuous` | on checkpoint + WAL ships ~1s | yes | Production default |
+| `Cloud` | every commit, before ack | none | Multi-writer (Shared mode) |
+
+`Continuous` is the default. `Cloud` is required for `HaMode::Shared` because multiple writers need every write visible immediately. `Checkpoint` is best for local-only workloads where crash recovery from the last checkpoint is acceptable.
 
 ## Key concepts
 

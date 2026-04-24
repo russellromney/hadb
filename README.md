@@ -63,14 +63,34 @@ Same replication and leader election in both modes. The difference is whether th
 
 hadb is a workspace of crates:
 
-- **hadb** -- Core coordination. Leader election via `LeaseStore` trait, role management, follower readiness (`JoinResult` with `caught_up` + `position`), `ShardedLeaseStore` for horizontal scaling. Zero cloud dependencies.
-- **hadb-io** -- Shared IO infrastructure. `ObjectStore` trait, S3 client, retry with circuit breaker, concurrent uploads, HMAC-signed webhooks, GFS retention.
-- **hadb-lease-s3** -- S3 leader election via conditional PUTs (ETags). CAS for compare-and-swap.
-- **hadb-lease-nats** -- NATS JetStream KV leader election. 2-5ms operations (vs S3's 50-200ms). Zero per-request cost.
-- **hadb-lease-etcd** -- etcd leader election via KV transactions. Zero new infra on Kubernetes.
-- **[hadb-changeset](https://github.com/russellromney/hadb-changeset)** -- Unified replication formats. Physical (`.hadbp`) and journal (`.hadbj`) changesets with SHA-256 checksum chaining. Self-describing page ID width (u32 for SQLite, u64 for DuckDB). [crates.io](https://crates.io/crates/hadb-changeset).
-- **hadb-cli** -- Shared CLI framework for database tools (args, config, commands).
-- **[turbodb](turbodb/)** -- Spec for S3-tiered storage (page groups, prefetch, encryption, caching). Checkpoint = snapshot. The turbo layer's manifest is the ha layer's replication cursor.
+**Coordination traits:**
+- **hadb** — Core coordination. Leader election via `LeaseStore` trait, role management, follower readiness. Zero cloud dependencies.
+- **hadb-lease** — `LeaseStore` trait crate.
+- **hadb-storage** — `StorageBackend` trait crate (byte-level storage for WAL replication and coordination blobs).
+
+**Lease store implementations:**
+- **hadb-lease-s3** — S3 leader election via conditional PUTs (ETags).
+- **hadb-lease-nats** — NATS JetStream KV leader election. 2-5ms operations.
+- **hadb-lease-cinch** — HTTP lease store for Cinch Cinch API integration.
+- **hadb-lease-mem** — In-memory lease store for tests.
+
+**Storage backend implementations:**
+- **hadb-storage-s3** — S3 storage backend.
+- **hadb-storage-local** — Local filesystem storage backend.
+- **hadb-storage-cinch** — HTTP storage backend for Cinch Cinch API.
+- **hadb-storage-mem** — In-memory storage backend for tests.
+
+**Manifest layer (turbodb spec):**
+- **turbodb** — Manifest trait and spec for S3-tiered storage.
+- **turbodb-manifest-s3** — S3 manifest store implementation.
+- **turbodb-manifest-cinch** — HTTP manifest store for Cinch Cinch API.
+- **turbodb-manifest-nats** — NATS manifest store.
+- **turbodb-manifest-mem** — In-memory manifest store for tests.
+
+**Shared infrastructure:**
+- **hadb-io** — S3 client, retry with circuit breaker, concurrent uploads.
+- **hadb-changeset** — Unified replication formats (`.hadbp`, `.hadbj`).
+- **hadb-cli** — Shared CLI framework.
 
 Database-specific crates (haqlite for SQLite, hakuzu for Kuzu) compose these layers. Tiered storage implementations (turbolite, turbograph) follow the turbodb spec.
 
@@ -102,23 +122,40 @@ hadb handles coordination; you tell it how your database replicates and executes
 | **`Replicator`** | Sync layer -- add, pull, remove, sync | [walrust](https://github.com/russellromney/walrust) -- WAL replication to S3 |
 | **`Executor`** | Query execution -- execute, is_mutation | [haqlite](https://github.com/russellromney/haqlite) -- rusqlite read/write with role-aware forwarding |
 | **`LeaseStore`** | Leader election -- read, write_if_match, delete | [hadb-lease-s3](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) -- S3 conditional PUT (ETag CAS) leader claims and node registry |
-| **`StorageBackend`** | Coordination blobs -- upload, download, list, delete | [hadb-io/s3](https://github.com/russellromney/hadb/tree/main/hadb-io) -- S3 for storage |
+| **`StorageBackend`** | Coordination blobs -- upload, download, list, delete | [hadb-storage-s3](https://github.com/russellromney/hadb/tree/main/hadb-storage-s3) -- S3 storage backend |
 
 `LeaseStore` and `StorageBackend` already have S3 implementations in hadb-lease-s3. For most new databases, you only need to implement `Replicator` and `Executor`.
 
-Shared infrastructure (S3 client, retry/circuit breaker, concurrent uploads, webhooks, GFS retention) is provided by [hadb-io](https://github.com/russellromney/hadb/tree/main/hadb-io) -- your replicator uses it instead of writing S3 upload logic from scratch.
+Shared infrastructure (S3 client, retry/circuit breaker, concurrent uploads) is provided by [hadb-io](https://github.com/russellromney/hadb/tree/main/hadb-io). Concrete storage backends live in `hadb-storage-*` crates.
 
 ## Project status
 
 All crates published to [crates.io](https://crates.io/crates/hadb).
 
 **Core (hadb workspace):**
-- [**hadb**](https://github.com/russellromney/hadb/tree/main/hadb) -- Coordination framework. Leader election, role management, follower readiness, ShardedLeaseStore. Stable.
-- [**hadb-io**](https://github.com/russellromney/hadb/tree/main/hadb-io) -- Shared infrastructure. ObjectStore trait, S3 client, retry/circuit breaker, concurrent uploads, webhooks, GFS retention. Stable.
-- [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) -- S3 lease store via conditional PUTs. Works on AWS S3. **Not compatible with Tigris** (conditional PUTs are not atomic for concurrent requests).
-- [**hadb-lease-nats**](https://github.com/russellromney/hadb/tree/main/hadb-lease-nats) -- NATS JetStream KV lease store. 20-50x faster than S3. Tested against real NATS.
-- [**hadb-lease-etcd**](https://github.com/russellromney/hadb/tree/main/hadb-lease-etcd) -- etcd lease store via KV transactions. Zero new infra on Kubernetes. Tested against real etcd.
-- [**hadb-cli**](https://github.com/russellromney/hadb/tree/main/hadb-cli) -- Shared CLI framework (args, config, commands). Used by haqlite.
+- [**hadb**](https://github.com/russellromney/hadb/tree/main/hadb) — Coordination framework. Leader election, role management, follower readiness. Stable.
+- [**hadb-lease**](https://github.com/russellromney/hadb/tree/main/hadb-lease) — `LeaseStore` trait.
+- [**hadb-storage**](https://github.com/russellromney/hadb/tree/main/hadb-storage) — `StorageBackend` trait.
+- [**hadb-io**](https://github.com/russellromney/hadb/tree/main/hadb-io) — Shared infrastructure. S3 client, retry/circuit breaker, concurrent uploads. Stable.
+- [**hadb-cli**](https://github.com/russellromney/hadb/tree/main/hadb-cli) — Shared CLI framework.
+
+**Lease stores:**
+- [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) — S3 lease store via conditional PUTs. Works on AWS S3. **Not compatible with Tigris**.
+- [**hadb-lease-nats**](https://github.com/russellromney/hadb/tree/main/hadb-lease-nats) — NATS JetStream KV lease store. 20-50x faster than S3.
+- [**hadb-lease-cinch**](https://github.com/russellromney/hadb/tree/main/hadb-lease-cinch) — HTTP lease store for Cinch Cinch API.
+- [**hadb-lease-mem**](https://github.com/russellromney/hadb/tree/main/hadb-lease-mem) — In-memory lease store for tests.
+
+**Storage backends:**
+- [**hadb-storage-s3**](https://github.com/russellromney/hadb/tree/main/hadb-storage-s3) — S3 storage backend.
+- [**hadb-storage-local**](https://github.com/russellromney/hadb/tree/main/hadb-storage-local) — Local filesystem storage backend.
+- [**hadb-storage-cinch**](https://github.com/russellromney/hadb/tree/main/hadb-storage-cinch) — HTTP storage backend for Cinch Cinch API.
+- [**hadb-storage-mem**](https://github.com/russellromney/hadb/tree/main/hadb-storage-mem) — In-memory storage backend for tests.
+
+**Manifest layer (turbodb):**
+- [**turbodb**](https://github.com/russellromney/hadb/tree/main/turbodb) — Manifest trait and spec.
+- [**turbodb-manifest-s3**](https://github.com/russellromney/hadb/tree/main/turbodb-manifest-s3) — S3 manifest store.
+- [**turbodb-manifest-cinch**](https://github.com/russellromney/hadb/tree/main/turbodb-manifest-cinch) — HTTP manifest store for Cinch Cinch API.
+- [**turbodb-manifest-nats**](https://github.com/russellromney/hadb/tree/main/turbodb-manifest-nats) — NATS manifest store.
 
 **Database implementations:**
 - [**haqlite**](https://github.com/russellromney/haqlite) -- SQLite HA. Structured errors, forwarding retry, read semaphore, graceful shutdown, pluggable LeaseStore (S3 or NATS), CLI with 7 commands. Most complete.

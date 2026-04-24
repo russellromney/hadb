@@ -1,0 +1,24 @@
+[package]
+name = "turbodb-manifest-nats"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NATS JetStream KV ManifestStore for turbodb. CAS via KV revisions."
+keywords = ["database", "manifest", "nats", "jetstream"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+turbodb = { path = "../turbodb", version = "0.4.0" }
+hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+async-nats = "0.46"
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+bytes = "1"
+rmp-serde = { workspace = true }
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }
+serde_json = { workspace = true }

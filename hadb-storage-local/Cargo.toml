@@ -1,0 +1,21 @@
+[package]
+name = "hadb-storage-local"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local filesystem StorageBackend impl for hadb-storage. Rooted at a directory; atomic writes via temp-file + rename; best-effort CAS."
+keywords = ["ha", "storage", "filesystem"]
+categories = ["database"]
+
+[dependencies]
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
+hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tempfile = "3"

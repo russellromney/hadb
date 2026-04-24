@@ -9,7 +9,6 @@
 - `InMemoryManifestStore` for testing (30 tests: CAS, serialization, boundary values, contract enforcement)
 - `hadb-manifest-s3`: S3 conditional PUTs, HeadObject for cheap `meta()` via custom metadata headers (13 tests)
 - `hadb-manifest-nats`: NATS JetStream KV with native revision CAS (13 tests, verified against real NATS)
-- `hadb-manifest-etcd`: etcd transactions with ModRevision CAS (13 tests)
 - `hadb-manifest-redis`: Lua scripts for atomic CAS, Redis Cluster compatible via hash tags (13 tests)
 - Added `rmp-serde` workspace dependency for msgpack serialization
 - Signal-f: Coordinator integration

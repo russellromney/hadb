@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// version identifier. `success=false` means a precondition failed
 /// (key already exists for `put_if_absent`, or etag mismatch for
 /// `put_if_match`); the caller must re-read and retry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CasResult {
     pub success: bool,
     pub etag: Option<String>,
@@ -100,8 +100,16 @@ pub trait StorageBackend: Send + Sync {
 
     /// Batch delete. Default is serial `delete` calls; override for backends
     /// with native batch primitives (S3 DeleteObjects, HTTP bulk endpoints).
-    /// Returns the number of keys that were present (deletion is idempotent
-    /// so the count reflects deletes that did work, not total calls).
+    ///
+    /// ## Semantics
+    ///
+    /// * "Missing key" is success (idempotent delete), the same as `delete`.
+    /// * Explicit per-key server failures must produce `Err` with detail
+    ///   about the failed keys; do not warn-and-continue. Callers
+    ///   (compaction, garbage collection) depend on visible failure.
+    /// * The returned `usize` is a count of keys the backend accepted, not a
+    ///   diagnostic. Callers needing per-key results should call `delete` in
+    ///   a loop instead.
     async fn delete_many(&self, keys: &[String]) -> Result<usize> {
         let mut count = 0;
         for key in keys {

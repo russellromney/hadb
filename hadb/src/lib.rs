@@ -1,20 +1,24 @@
 //! hadb: Database-agnostic HA coordination framework.
 //!
 //! Pure coordination logic with zero cloud dependencies. Abstracts away
-//! databases (SQL, graph, document) and storage backends (S3, etcd, Consul).
+//! databases (SQL, graph, document) and storage backends. Manifest types
+//! and the `ManifestStore` trait live in the sibling `turbodb` crate
+//! (extracted in Phase Turbogenesis); hadb depends on turbodb for that
+//! trait surface and owns the lease/coordination side.
 //!
 //! ```ignore
 //! use hadb::{Coordinator, CoordinatorConfig, LeaseConfig};
+//! use turbodb::ManifestStore;
 //!
+//! // The lease store lives on LeaseConfig; None here = no HA (always leader).
 //! let config = CoordinatorConfig {
-//!     lease: Some(LeaseConfig::new(instance_id, address)),
+//!     lease: Some(LeaseConfig::new(lease_store, instance_id, address)),
 //!     ..Default::default()
 //! };
 //!
 //! let coordinator = Coordinator::new(
 //!     replicator,              // Arc<dyn Replicator>
-//!     Some(lease_store),       // Option<Arc<dyn LeaseStore>>
-//!     Some(manifest_store),    // Option<Arc<dyn ManifestStore>>
+//!     Some(manifest_store),    // Option<Arc<dyn turbodb::ManifestStore>>
 //!     None,                    // Option<Arc<dyn NodeRegistry>>
 //!     follower_behavior,       // Arc<dyn FollowerBehavior>
 //!     "prefix/",
@@ -27,21 +31,15 @@
 pub mod client;
 pub mod coordinator;
 pub mod follower;
-pub mod ha_node;
 pub mod lease;
-pub mod manifest;
 pub mod metrics;
 pub mod node_registry;
-pub mod sharded_lease;
 pub mod traits;
 pub mod types;
 
 // Re-export core traits
-pub use traits::{CasResult, LeaseStore, ManifestStore, Replicator, StorageBackend};
-pub use manifest::{
-    BTreeManifestEntry, FrameEntry, HaManifest, InMemoryManifestStore, ManifestMeta,
-    StorageManifest, SubframeOverride,
-};
+pub use hadb_lease::{CasResult, LeaseStore};
+pub use traits::{Replicator, StorageBackend};
 pub use types::{CoordinatorConfig, Durability, HaMode, LeaseConfig, Role, RoleEvent, validate_mode_durability};
 pub use metrics::{HaMetrics, MetricsSnapshot};
 pub use lease::{DbLease, InMemoryLeaseStore, LeaseData};
@@ -49,5 +47,3 @@ pub use node_registry::{node_key, nodes_prefix, InMemoryNodeRegistry, NodeRegist
 pub use follower::{FollowerBehavior, LeaseMonitorContext, run_leader_renewal, run_lease_monitor};
 pub use client::{HaClient, HaClientBuilder};
 pub use coordinator::{Coordinator, JoinResult};
-pub use ha_node::{HaNode, HaNodeConfig};
-pub use sharded_lease::ShardedLeaseStore;

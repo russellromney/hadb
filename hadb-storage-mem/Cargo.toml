@@ -1,0 +1,19 @@
+[package]
+name = "hadb-storage-mem"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "In-memory StorageBackend impl for hadb-storage. Primarily for tests and examples."
+keywords = ["ha", "storage", "in-memory", "testing"]
+categories = ["database", "development-tools::testing"]
+
+[dependencies]
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

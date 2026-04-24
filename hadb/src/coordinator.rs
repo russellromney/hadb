@@ -8,7 +8,7 @@
 //! does network I/O.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
@@ -20,19 +20,9 @@ use crate::follower::{run_leader_renewal, run_lease_monitor, FollowerBehavior, L
 use crate::lease::DbLease;
 use crate::metrics::HaMetrics;
 use crate::node_registry::{NodeRegistration, NodeRegistry};
-use crate::manifest::ManifestStore;
-use crate::traits::{LeaseStore, Replicator};
+use turbodb::ManifestStore;
+use crate::traits::Replicator;
 use crate::types::{CoordinatorConfig, Role, RoleEvent};
-
-/// Resolve the effective lease key for a database.
-/// If `override_key` is set, returns it unchanged. Otherwise builds the
-/// legacy compound key `"{prefix}{name}/_lease.json"` used by S3/NATS backends.
-fn resolve_lease_key(override_key: &Option<String>, prefix: &str, name: &str) -> String {
-    match override_key {
-        Some(k) => k.clone(),
-        None => format!("{}{}/_lease.json", prefix, name),
-    }
-}
 
 /// Atomic wrapper around Role for lock-free reads.
 pub(crate) struct AtomicRole(AtomicU8);
@@ -63,15 +53,15 @@ pub struct JoinResult {
 }
 
 /// Per-database entry in the coordinator.
+///
+/// The shared `caught_up` / `position` atomics that haqlite reads come back
+/// to the caller via `JoinResult` — DbEntry only needs the bookkeeping it
+/// uses internally (role, address, cancel handle, task handle).
 struct DbEntry {
     role: Arc<AtomicRole>,
     leader_address: Arc<RwLock<String>>,
     cancel_tx: watch::Sender<bool>,
     task_handle: JoinHandle<()>,
-    /// Path to the database file. Stored for promote/demote cycles (HaNode).
-    db_path: PathBuf,
-    caught_up: Arc<AtomicBool>,
-    position: Arc<AtomicU64>,
 }
 
 /// HA coordinator.
@@ -80,7 +70,6 @@ struct DbEntry {
 /// any database and any storage backend. All dependencies are trait objects.
 pub struct Coordinator {
     replicator: Arc<dyn Replicator>,
-    lease_store: Option<Arc<dyn LeaseStore>>,
     manifest_store: Option<Arc<dyn ManifestStore>>,
     node_registry: Option<Arc<dyn NodeRegistry>>,
     follower_behavior: Arc<dyn FollowerBehavior>,
@@ -95,15 +84,14 @@ impl Coordinator {
     /// Create a new Coordinator.
     ///
     /// `replicator` handles replication (snapshot + incremental updates).
-    /// `lease_store` is for CAS lease operations (None = no HA, always Leader).
     /// `manifest_store` is for manifest polling and publishing (None = no manifest).
     /// `node_registry` is for read replica discovery (None = no registry).
     /// `follower_behavior` defines database-specific follower pull and promotion logic.
     /// `prefix` is the storage key prefix for all databases (e.g. "wal/" or "ha/").
-    /// `config` is the coordinator configuration.
+    /// `config` is the coordinator configuration. The lease store is part of
+    /// `config.lease` (`Option<LeaseConfig>`) — `None` = no HA, always Leader.
     pub fn new(
         replicator: Arc<dyn Replicator>,
-        lease_store: Option<Arc<dyn LeaseStore>>,
         manifest_store: Option<Arc<dyn ManifestStore>>,
         node_registry: Option<Arc<dyn NodeRegistry>>,
         follower_behavior: Arc<dyn FollowerBehavior>,
@@ -114,7 +102,6 @@ impl Coordinator {
 
         Arc::new(Self {
             replicator,
-            lease_store,
             manifest_store,
             node_registry,
             follower_behavior,
@@ -131,8 +118,8 @@ impl Coordinator {
     /// If leases are enabled: claims the lease -> Leader, or follows -> Follower.
     /// If leases are disabled: starts leader sync -> always Leader.
     pub async fn join(self: &Arc<Self>, name: &str, db_path: &Path) -> Result<JoinResult> {
-        let lease_store = match &self.lease_store {
-            Some(ls) => ls.clone(),
+        let lease_config = match &self.config.lease {
+            Some(c) => c,
             None => {
                 // No HA — always leader.
                 tokio::time::timeout(
@@ -159,9 +146,6 @@ impl Coordinator {
                         leader_address: Arc::new(RwLock::new(String::new())),
                         cancel_tx,
                         task_handle: tokio::spawn(async {}),
-                        db_path: db_path.to_path_buf(),
-                        caught_up: caught_up.clone(),
-                        position: position.clone(),
                     },
                 );
                 let _ = self.role_tx.send(RoleEvent::Joined {
@@ -174,22 +158,16 @@ impl Coordinator {
         };
 
         // HA mode: try to claim lease.
-        let lease_config = self
-            .config
-            .lease
-            .as_ref()
-            .expect("lease config must be present when lease_store is Some");
-
-        let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
+        let lease_key = lease_config.store.key_for(name);
         let mut lease = DbLease::new(
-            lease_store,
+            lease_config.store.clone(),
             &lease_key,
             &lease_config.instance_id,
             &lease_config.address,
             lease_config.ttl_secs,
         );
-        if let Some(ref ft) = self.config.fence_token {
-            lease = lease.with_fence_token(ft.clone());
+        if let Some(ref fw) = self.config.fence_writer {
+            lease = lease.with_fence_writer(fw.clone());
         }
 
         self.metrics.inc(&self.metrics.lease_claims_attempted);
@@ -206,7 +184,7 @@ impl Coordinator {
             lease_config.address.clone()
         } else {
             match DbLease::new(
-                self.lease_store.as_ref().unwrap().clone(),
+                lease_config.store.clone(),
                 &lease_key,
                 &lease_config.instance_id,
                 &lease_config.address,
@@ -284,9 +262,6 @@ impl Coordinator {
                         leader_address: leader_addr,
                         cancel_tx,
                         task_handle,
-                        db_path: db_path.to_path_buf(),
-                        caught_up: leader_caught_up.clone(),
-                        position: leader_position.clone(),
                     },
                 );
 
@@ -347,12 +322,14 @@ impl Coordinator {
                 let pos_for_tasks = follower_position.clone();
                 let cu_for_tasks = follower_caught_up.clone();
 
+                let lease_config_owned = lease_config.clone();
                 let task_handle = tokio::spawn(async move {
                     self_clone
                         .run_follower_tasks(
                             db_name,
                             db_path_buf,
                             lease,
+                            lease_config_owned,
                             shared_role,
                             leader_addr,
                             follower_stop_tx,
@@ -371,9 +348,6 @@ impl Coordinator {
                         leader_address: addr_for_entry,
                         cancel_tx,
                         task_handle,
-                        db_path: db_path.to_path_buf(),
-                        caught_up: follower_caught_up.clone(),
-                        position: follower_position.clone(),
                     },
                 );
 
@@ -387,12 +361,18 @@ impl Coordinator {
         }
     }
 
-    /// Run follower tasks (pull loop + lease monitor).
+    /// Run follower tasks (pull loop + lease monitor). The caller passes
+    /// `lease_config` in directly because this function is only ever
+    /// reached on the HA path (where `self.config.lease` is already
+    /// `Some`), and threading the config through avoids a redundant
+    /// "panic if missing" lookup here.
+    #[allow(clippy::too_many_arguments)]
     async fn run_follower_tasks(
         self: Arc<Self>,
         db_name: String,
         db_path: std::path::PathBuf,
         lease: DbLease,
+        lease_config: crate::types::LeaseConfig,
         shared_role: Arc<AtomicRole>,
         leader_addr: Arc<RwLock<String>>,
         follower_stop_tx: watch::Sender<bool>,
@@ -401,12 +381,6 @@ impl Coordinator {
         shared_position: Arc<AtomicU64>,
         shared_caught_up: Arc<AtomicBool>,
     ) {
-        let lease_config = self
-            .config
-            .lease
-            .as_ref()
-            .expect("lease must be present");
-
         // Spawn follower pull loop
         let follower_handle = {
             let behavior = self.follower_behavior.clone();
@@ -526,43 +500,41 @@ impl Coordinator {
                     );
                 }
 
-                if let Some(ls) = &self.lease_store {
-                    if let Some(lease_config) = &self.config.lease {
-                        let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
-                        let lease = DbLease::new(
-                            ls.clone(),
-                            &lease_key,
-                            &lease_config.instance_id,
-                            &lease_config.address,
-                            lease_config.ttl_secs,
-                        );
-                        match lease.read().await {
-                            Ok(Some((data, _)))
-                                if data.instance_id == lease_config.instance_id =>
-                            {
-                                if let Err(e) = ls.delete(lease.lease_key()).await {
-                                    tracing::error!(
-                                        "Coordinator: failed to release lease for '{}': {}",
-                                        name,
-                                        e
-                                    );
-                                }
-                            }
-                            Ok(Some((data, _))) => {
-                                tracing::info!(
-                                    "Coordinator: lease for '{}' held by {} (not us), skipping release",
-                                    name,
-                                    data.instance_id
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
+                if let Some(lease_config) = &self.config.lease {
+                    let lease_key = lease_config.store.key_for(name);
+                    let lease = DbLease::new(
+                        lease_config.store.clone(),
+                        &lease_key,
+                        &lease_config.instance_id,
+                        &lease_config.address,
+                        lease_config.ttl_secs,
+                    );
+                    match lease.read().await {
+                        Ok(Some((data, _)))
+                            if data.instance_id == lease_config.instance_id =>
+                        {
+                            if let Err(e) = lease_config.store.delete(lease.lease_key()).await {
                                 tracing::error!(
-                                    "Coordinator: failed to read lease for '{}' during leave: {}",
+                                    "Coordinator: failed to release lease for '{}': {}",
                                     name,
                                     e
                                 );
                             }
+                        }
+                        Ok(Some((data, _))) => {
+                            tracing::info!(
+                                "Coordinator: lease for '{}' held by {} (not us), skipping release",
+                                name,
+                                data.instance_id
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::error!(
+                                "Coordinator: failed to read lease for '{}' during leave: {}",
+                                name,
+                                e
+                            );
                         }
                     }
                 }
@@ -633,6 +605,12 @@ impl Coordinator {
         self.manifest_store.as_ref()
     }
 
+    /// Get the lease config, if configured. Useful for reading back timing
+    /// policy after a `Coordinator` is constructed (tests and diagnostics).
+    pub fn lease_config(&self) -> Option<&crate::LeaseConfig> {
+        self.config.lease.as_ref()
+    }
+
     /// Discover registered replicas for a database.
     pub async fn discover_replicas(&self, name: &str) -> Result<Vec<NodeRegistration>> {
         let registry = match &self.node_registry {
@@ -646,22 +624,17 @@ impl Coordinator {
 
         let all = registry.discover_all(&self.prefix, name).await?;
 
-        let current_session_id = match &self.lease_store {
-            Some(ls) => {
-                let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
-                let lease = DbLease::new(
-                    ls.clone(),
-                    &lease_key,
-                    &lease_config.instance_id,
-                    &lease_config.address,
-                    lease_config.ttl_secs,
-                );
-                match lease.read().await {
-                    Ok(Some((data, _))) => data.session_id,
-                    _ => return Ok(Vec::new()),
-                }
-            }
-            None => return Ok(Vec::new()),
+        let lease_key = lease_config.store.key_for(name);
+        let lease = DbLease::new(
+            lease_config.store.clone(),
+            &lease_key,
+            &lease_config.instance_id,
+            &lease_config.address,
+            lease_config.ttl_secs,
+        );
+        let current_session_id = match lease.read().await {
+            Ok(Some((data, _))) => data.session_id,
+            _ => return Ok(Vec::new()),
         };
 
         Ok(all
@@ -750,30 +723,28 @@ impl Coordinator {
             );
         }
 
-        if let Some(ls) = &self.lease_store {
-            if let Some(lease_config) = &self.config.lease {
-                let lease_key = resolve_lease_key(&self.config.lease_key, &self.prefix, name);
-                let lease = DbLease::new(
-                    ls.clone(),
-                    &lease_key,
-                    &lease_config.instance_id,
-                    &lease_config.address,
-                    lease_config.ttl_secs,
-                );
-                match lease.read().await {
-                    Ok(Some((data, _)))
-                        if data.instance_id == lease_config.instance_id =>
-                    {
-                        if let Err(e) = ls.delete(lease.lease_key()).await {
-                            tracing::error!(
-                                "Coordinator: failed to release lease during handoff for '{}': {}",
-                                name,
-                                e
-                            );
-                        }
+        if let Some(lease_config) = &self.config.lease {
+            let lease_key = lease_config.store.key_for(name);
+            let lease = DbLease::new(
+                lease_config.store.clone(),
+                &lease_key,
+                &lease_config.instance_id,
+                &lease_config.address,
+                lease_config.ttl_secs,
+            );
+            match lease.read().await {
+                Ok(Some((data, _)))
+                    if data.instance_id == lease_config.instance_id =>
+                {
+                    if let Err(e) = lease_config.store.delete(lease.lease_key()).await {
+                        tracing::error!(
+                            "Coordinator: failed to release lease during handoff for '{}': {}",
+                            name,
+                            e
+                        );
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 
@@ -784,113 +755,5 @@ impl Coordinator {
 
         tracing::info!("Coordinator: '{}' handed off leadership", name);
         Ok(true)
-    }
-
-    /// Promote a database from Follower to Leader.
-    ///
-    /// Used by HaNode for engine-level HA: when the engine acquires its lease,
-    /// all databases are promoted at once. This restarts WAL sync as Leader
-    /// without going through the full join() flow (which would re-pull from storage).
-    ///
-    /// The caller (HaNode) is responsible for catching up follower data before
-    /// calling promote — this method does NOT call catchup_on_promotion.
-    pub async fn promote(&self, name: &str) -> Result<bool> {
-        let databases = self.databases.read().await;
-        let entry = match databases.get(name) {
-            Some(e) => e,
-            None => return Ok(false),
-        };
-
-        if entry.role.load() == Role::Leader {
-            return Ok(false); // already Leader
-        }
-
-        // Cancel any running follower task
-        let _ = entry.cancel_tx.send(true);
-
-        // Resume replication as leader, continuing from the existing S3 seq
-        // so followers can discover new changesets via discover_after().
-        tokio::time::timeout(
-            self.config.replicator_timeout,
-            self.replicator.add_continuing(name, &entry.db_path),
-        )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Coordinator: replicator.add_continuing('{}') timed out during promote after {:?}",
-                name,
-                self.config.replicator_timeout
-            )
-        })??;
-
-        entry.role.store(Role::Leader);
-        let _ = self.role_tx.send(RoleEvent::Promoted {
-            db_name: name.to_string(),
-        });
-
-        tracing::info!("Coordinator: '{}' promoted to Leader", name);
-        Ok(true)
-    }
-
-    /// Demote a database from Leader to Follower.
-    ///
-    /// Used by HaNode for engine-level HA: when the engine loses its lease,
-    /// all databases are demoted at once. This stops WAL sync and sets the role
-    /// to Follower without releasing any per-database lease (HaNode uses engine-level leases).
-    pub async fn demote(&self, name: &str) -> Result<bool> {
-        let databases = self.databases.read().await;
-        let entry = match databases.get(name) {
-            Some(e) => e,
-            None => return Ok(false),
-        };
-
-        if entry.role.load() == Role::Follower {
-            return Ok(false); // already Follower
-        }
-
-        // Cancel any running leader renewal task
-        let _ = entry.cancel_tx.send(true);
-
-        // Stop WAL sync (final sync before stopping)
-        if tokio::time::timeout(
-            self.config.replicator_timeout,
-            self.replicator.remove(name),
-        )
-        .await
-        .is_err()
-        {
-            tracing::error!(
-                "Coordinator: replicator.remove('{}') timed out during demote after {:?}",
-                name,
-                self.config.replicator_timeout
-            );
-        }
-
-        entry.role.store(Role::Follower);
-        let _ = self.role_tx.send(RoleEvent::Demoted {
-            db_name: name.to_string(),
-        });
-
-        tracing::info!("Coordinator: '{}' demoted to Follower", name);
-        Ok(true)
-    }
-
-    /// Get the stored db_path for a database (used by HaNode for promote/demote cycles).
-    pub async fn db_path(&self, name: &str) -> Option<PathBuf> {
-        self.databases
-            .read()
-            .await
-            .get(name)
-            .map(|e| e.db_path.clone())
-    }
-
-    /// Get all database names and their current roles.
-    pub async fn all_roles(&self) -> Vec<(String, Role)> {
-        self.databases
-            .read()
-            .await
-            .iter()
-            .map(|(name, entry)| (name.clone(), entry.role.load()))
-            .collect()
     }
 }

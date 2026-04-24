@@ -1,0 +1,31 @@
+[package]
+name = "hadb-storage-cinch"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cinch-protocol HTTP StorageBackend impl. Speaks /v1/sync/{prefix}/ routes with Bearer auth and Fence-Token fencing for HA writes."
+keywords = ["ha", "storage", "cinch", "fencing"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+hadb-lease = { path = "../hadb-lease", version = "0.4.0" }
+percent-encoding = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+axum = { workspace = true }
+uuid = { workspace = true }
+# Pulled in for tests only: gives the mock-server tests the real
+# AtomicFence type so we exercise the production wiring shape. Not a
+# production dep; keeps the runtime dep graph trait-only.
+hadb-lease-cinch = { path = "../hadb-lease-cinch", version = "0.4.0" }

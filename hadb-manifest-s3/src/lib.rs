@@ -1,17 +1,13 @@
-//! hadb-manifest-s3: S3 manifest store for hadb.
+//! DEPRECATED stub.
 //!
-//! Stores HaManifest as msgpack in S3 object body, with version/writer_id/lease_epoch
-//! in custom metadata headers for cheap HeadObject polling.
+//! The S3 ManifestStore moved to `turbodb-manifest-s3` during Phase
+//! Turbogenesis. This crate is intentionally empty — it exists only so
+//! `hakuzu`'s `Cargo.toml` can resolve the path dependency until
+//! hakuzu's own Phase GraphTurbogenesis lands and swaps over to
+//! `turbodb-manifest-s3`. After that, delete this directory.
 //!
-//! ```ignore
-//! use hadb_manifest_s3::S3ManifestStore;
-//!
-//! let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-//! let client = aws_sdk_s3::Client::new(&config);
-//! let store = S3ManifestStore::new(client, "my-bucket".into());
-//! ```
-
-mod error;
-pub mod manifest_store;
-
-pub use manifest_store::S3ManifestStore;
+//! Hakuzu's source does still call `hadb_manifest_s3::S3ManifestStore`
+//! at the use site; that code only compiles when consumers enable the
+//! `graph-ha` feature, which is off by default everywhere right now.
+//! For consumers that DO need a working S3 manifest store today,
+//! depend on `turbodb-manifest-s3` directly.

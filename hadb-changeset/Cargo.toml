@@ -14,7 +14,7 @@ test-utils = []
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-hadb-io = { path = "../hadb-io", default-features = false }
+hadb-storage = { path = "../hadb-storage" }
 sha2 = "0.10"
 thiserror = "2"
 tokio = { workspace = true }
@@ -24,4 +24,3 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 rand = { workspace = true }
-hadb-io = { path = "../hadb-io", features = ["s3"] }

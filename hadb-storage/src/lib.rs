@@ -18,17 +18,14 @@
 //! manifest stores build on. Async throughout; sync consumers wrap in
 //! `block_on` themselves.
 //!
-//! # Fence
+//! # Fencing
 //!
-//! `Fence` is the HA invariant that prevents a former-leader from writing
-//! stale data after losing its lease. The lease manager holds a
-//! `FenceWriter`; storage adapters that care about fencing (HTTP-backed
-//! ones) hold a `Fence` and call `Fence::require()` before every write.
-//! Backends that don't need fencing (local filesystem, tests) simply don't
-//! carry one.
+//! Fencing (the HA invariant that refuses writes from former leaders) is
+//! not defined here. `hadb-storage` is a byte-level blob store; whether a
+//! particular backend requires a fence revision is the backend's concern,
+//! and the fence primitive itself lives alongside the lease layer that
+//! produces it: see [`hadb_lease::FenceSource`].
 
-pub mod fence;
 pub mod storage;
 
-pub use fence::{Fence, FenceWriter, NoActiveLease};
 pub use storage::{CasResult, StorageBackend};

@@ -8,7 +8,7 @@ repository.workspace = true
 description = "NATS JetStream KV lease store for hadb"
 
 [dependencies]
-hadb = { path = "../hadb", version = "0.4.0" }
+hadb-lease = { path = "../hadb-lease", version = "0.4.0" }
 async-nats = "0.46"
 async-trait.workspace = true
 anyhow.workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "hadb-storage-s3"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "S3-compatible StorageBackend impl for hadb-storage. Works with AWS S3, Tigris, MinIO, Cloudflare R2, Wasabi, etc. CAS via conditional PUT (If-None-Match / If-Match)."
+keywords = ["ha", "storage", "s3", "tigris"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+aws-sdk-s3 = "1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-smithy-types = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+uuid = { workspace = true }
