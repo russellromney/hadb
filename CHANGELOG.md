@@ -2,6 +2,16 @@
 
 ## 2026-04-03
 
+### Phase Beacon: Follower Readiness in Coordinator (complete)
+- Beacon-a: `caught_up: Arc<AtomicBool>` added next to `follower_position` in `FollowerState`. Both coordinator (sets on Promoted/Demoted/Fenced) and follower behavior (sets during poll loop) write to the same atomic.
+- Beacon-c: `FollowerBehavior::run_follower_loop()` signature grew a `caught_up` parameter (breaking trait change).
+- `Coordinator::join()` now returns `JoinResult { role, caught_up, position }` so callers cache `Arc` refs for zero-overhead health checks (single atomic load) instead of locking the per-db `HashMap` RwLock on every read.
+- `HaMetrics` grew `follower_caught_up` and `follower_replay_position` gauges, surfaced via `MetricsSnapshot` and `to_prometheus()`.
+- Atomic with hakuzu Phase Parity and haqlite Phase Rampart-e — all three landed in one coordinated breaking change.
+
+### Phase 2: haqlite CLI (complete)
+- See haqlite Phase Meridian. 7 CLI bugs fixed, prefix threading, graceful shutdown, deterministic TXID.
+
 ### Phase Signal: ManifestStore (complete)
 - Signal-a through Signal-e: trait, types, 4 backends (S3, NATS, etcd, Redis)
 - `ManifestStore` trait in `hadb/src/manifest.rs` with `get`/`put`/`meta` and CAS semantics
@@ -25,6 +35,18 @@
 - 10 tests (gated by ETCD_ENDPOINTS env var)
 
 ## 2026-03-23
+
+### Phase Volt: NATS JetStream KV Lease Store (complete)
+- `hadb-lease-nats` crate implements `LeaseStore` trait via NATS JetStream KV.
+- `NatsLeaseStore::connect(url, bucket)` (creates/opens KV bucket) + `NatsLeaseStore::new(store)` for a pre-built handle.
+- `read` → `store.entry(key)`, revision as etag string. Deleted/purged entries return None.
+- `write_if_not_exists` → `store.create(key, data)`, `CreateErrorKind::AlreadyExists` = CAS conflict.
+- `write_if_match` → `store.update(key, data, revision)`, `UpdateErrorKind::WrongLastRevision` = CAS conflict.
+- `delete` → `store.purge(key)`, idempotent (hard delete, no history).
+- KV bucket config: `history=1` (only the latest value matters for leases).
+- 10 tests against real NATS (gated by `NATS_URL` env var).
+- haqlite consumes via `HaQLiteBuilder::lease_store(...)` + `WAL_LEASE_NATS_URL` env var behind the `nats-lease` feature; falls back to S3 if NATS is unreachable.
+- Operationally: NATS KV is 2-5ms per op vs S3 lease store's 50-200ms, with zero per-request cost on a single $2/month Fly machine vs ~$17/month at 1000 databases polling every 2s.
 
 ### Phase 1a: Create hadb-io + split hadb-s3
 - Created `hadb-io` crate: shared S3/retry/upload/webhook/retention infrastructure
