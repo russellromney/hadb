@@ -3,20 +3,34 @@ use std::time::Duration;
 
 use hadb_lease::LeaseStore;
 
-/// Database role in the HA cluster.
+/// Node behavior inside a HA topology.
+///
+/// `Leader` and `Follower` are assigned by lease outcome in
+/// [`HaMode::SingleWriter`]. `Client` and `LatentWriter` are self-declared
+/// roles for topologies that do not participate in leader election; they are
+/// visible in the API so higher-level crates can reject or implement them
+/// deliberately instead of overloading follower semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
+    /// Holds the persistent single-writer lease and accepts writes.
     Leader,
+    /// Replays from the leader and may promote when the lease expires.
     Follower,
+    /// Read-only consumer. Never claims a lease or promotes.
+    Client,
+    /// Shared-writer peer. Acquires per-write leases instead of leading.
+    LatentWriter,
 }
 
 /// HA topology mode: how writes are coordinated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HaMode {
-    /// Single persistent leader, followers replay.
-    Dedicated,
-    /// Multiple writers, lease-serialized per write.
-    Shared,
+    /// One node claims a persistent lease at join and holds it until
+    /// death/release. Runtime roles are `Leader`, `Follower`, or `Client`.
+    SingleWriter,
+    /// Peers acquire-write-release a per-write lease. Runtime roles are
+    /// `LatentWriter` or `Client`.
+    SharedWriter,
 }
 
 /// hadb's sole durability lever: how the Replicator ships the change log
@@ -47,7 +61,7 @@ pub enum Durability {
 
 impl Default for HaMode {
     fn default() -> Self {
-        HaMode::Dedicated
+        HaMode::SingleWriter
     }
 }
 
@@ -60,8 +74,8 @@ impl Default for Durability {
 impl std::fmt::Display for HaMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HaMode::Dedicated => write!(f, "Dedicated"),
-            HaMode::Shared => write!(f, "Shared"),
+            HaMode::SingleWriter => write!(f, "SingleWriter"),
+            HaMode::SharedWriter => write!(f, "SharedWriter"),
         }
     }
 }
@@ -79,23 +93,37 @@ impl std::fmt::Display for Durability {
 /// Validate a mode + durability combination.
 ///
 /// Valid combinations:
-/// - Dedicated + Local → OK
-/// - Dedicated + Replicated(_) → OK
-/// - Dedicated + SyncReplicated → OK
-/// - Shared + Local → OK (multi-writer + per-commit-page-writes is valid)
+/// - SingleWriter + Local → OK
+/// - SingleWriter + Replicated(_) → OK
+/// - SingleWriter + SyncReplicated → OK
+/// - SharedWriter + Local → OK (per-commit page writes are valid)
 ///
 /// Invalid:
-/// - Shared + Replicated(_): multiwriter + async log shipping diverges silently
-/// - Shared + SyncReplicated: no lease-per-commit mechanism, still a race
+/// - SharedWriter + Replicated(_): async log shipping diverges silently
+/// - SharedWriter + SyncReplicated: no lease-per-commit mechanism, still a race
 pub fn validate_mode_durability(mode: HaMode, durability: Durability) -> Result<(), String> {
     match (mode, durability) {
-        (HaMode::Dedicated, _) => Ok(()),
-        (HaMode::Shared, Durability::Local) => Ok(()),
-        (HaMode::Shared, Durability::Replicated(_)) => {
-            Err("multi-writer + async log shipping diverges silently across writers".to_string())
+        (HaMode::SingleWriter, _) => Ok(()),
+        (HaMode::SharedWriter, Durability::Local) => Ok(()),
+        (HaMode::SharedWriter, Durability::Replicated(_)) => {
+            Err("SharedWriter + async log shipping diverges silently across writers".to_string())
         }
-        (HaMode::Shared, Durability::SyncReplicated) => {
-            Err("multi-writer + sync log shipping without a lease-per-commit mechanism is still a race — use turbodb::Durability::Cloud".to_string())
+        (HaMode::SharedWriter, Durability::SyncReplicated) => {
+            Err("SharedWriter + sync log shipping without a lease-per-commit mechanism is still a race - use turbodb::Durability::Cloud".to_string())
+        }
+    }
+}
+
+/// Validate that a node role makes sense for the selected topology.
+pub fn validate_mode_role(mode: HaMode, role: Role) -> Result<(), String> {
+    match (mode, role) {
+        (HaMode::SingleWriter, Role::Leader | Role::Follower | Role::Client) => Ok(()),
+        (HaMode::SingleWriter, Role::LatentWriter) => {
+            Err("LatentWriter requires SharedWriter mode".to_string())
+        }
+        (HaMode::SharedWriter, Role::LatentWriter | Role::Client) => Ok(()),
+        (HaMode::SharedWriter, Role::Leader | Role::Follower) => {
+            Err("SharedWriter has no Leader/Follower; use LatentWriter or Client".to_string())
         }
     }
 }
@@ -106,6 +134,8 @@ impl Role {
         match self {
             Role::Leader => 0,
             Role::Follower => 1,
+            Role::Client => 2,
+            Role::LatentWriter => 3,
         }
     }
 
@@ -114,6 +144,8 @@ impl Role {
         match val {
             0 => Role::Leader,
             1 => Role::Follower,
+            2 => Role::Client,
+            3 => Role::LatentWriter,
             _ => panic!("Invalid role value: {}", val),
         }
     }
@@ -124,6 +156,8 @@ impl std::fmt::Display for Role {
         match self {
             Role::Leader => write!(f, "Leader"),
             Role::Follower => write!(f, "Follower"),
+            Role::Client => write!(f, "Client"),
+            Role::LatentWriter => write!(f, "LatentWriter"),
         }
     }
 }
@@ -270,6 +304,8 @@ mod tests {
     fn test_role_display() {
         assert_eq!(Role::Leader.to_string(), "Leader");
         assert_eq!(Role::Follower.to_string(), "Follower");
+        assert_eq!(Role::Client.to_string(), "Client");
+        assert_eq!(Role::LatentWriter.to_string(), "LatentWriter");
     }
 
     #[test]
@@ -283,24 +319,46 @@ mod tests {
     fn test_role_to_u8() {
         assert_eq!(Role::Leader.to_u8(), 0);
         assert_eq!(Role::Follower.to_u8(), 1);
+        assert_eq!(Role::Client.to_u8(), 2);
+        assert_eq!(Role::LatentWriter.to_u8(), 3);
     }
 
     #[test]
     fn test_role_from_u8() {
         assert_eq!(Role::from_u8(0), Role::Leader);
         assert_eq!(Role::from_u8(1), Role::Follower);
+        assert_eq!(Role::from_u8(2), Role::Client);
+        assert_eq!(Role::from_u8(3), Role::LatentWriter);
     }
 
     #[test]
     fn test_role_roundtrip() {
         assert_eq!(Role::from_u8(Role::Leader.to_u8()), Role::Leader);
         assert_eq!(Role::from_u8(Role::Follower.to_u8()), Role::Follower);
+        assert_eq!(Role::from_u8(Role::Client.to_u8()), Role::Client);
+        assert_eq!(
+            Role::from_u8(Role::LatentWriter.to_u8()),
+            Role::LatentWriter
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Invalid role value: 2")]
+    #[should_panic(expected = "Invalid role value: 4")]
     fn test_role_from_u8_invalid() {
-        Role::from_u8(2);
+        Role::from_u8(4);
+    }
+
+    #[test]
+    fn test_validate_mode_role() {
+        assert!(validate_mode_role(HaMode::SingleWriter, Role::Leader).is_ok());
+        assert!(validate_mode_role(HaMode::SingleWriter, Role::Follower).is_ok());
+        assert!(validate_mode_role(HaMode::SingleWriter, Role::Client).is_ok());
+        assert!(validate_mode_role(HaMode::SingleWriter, Role::LatentWriter).is_err());
+
+        assert!(validate_mode_role(HaMode::SharedWriter, Role::LatentWriter).is_ok());
+        assert!(validate_mode_role(HaMode::SharedWriter, Role::Client).is_ok());
+        assert!(validate_mode_role(HaMode::SharedWriter, Role::Leader).is_err());
+        assert!(validate_mode_role(HaMode::SharedWriter, Role::Follower).is_err());
     }
 
     #[test]

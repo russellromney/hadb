@@ -59,7 +59,7 @@ pub enum Durability {
     /// ack. No WAL/journal shipping (pages are the replication).
     /// Consumer runs its storage engine in S3Primary equivalent mode.
     /// RPO = 0. Expensive S3 PUT volume; write latency = S3 round-trip.
-    /// Required for multi-writer (haqlite-turbolite's `HaMode::Shared`).
+    /// Required for multi-writer (haqlite-turbolite's `HaMode::SharedWriter`).
     Cloud,
 }
 

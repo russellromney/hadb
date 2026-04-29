@@ -49,5 +49,6 @@ pub use node_registry::{
 };
 pub use traits::{NoOpReplicator, Replicator, StorageBackend};
 pub use types::{
-    validate_mode_durability, CoordinatorConfig, Durability, HaMode, LeaseConfig, Role, RoleEvent,
+    validate_mode_durability, validate_mode_role, CoordinatorConfig, Durability, HaMode,
+    LeaseConfig, Role, RoleEvent,
 };

@@ -181,6 +181,9 @@ impl Coordinator {
         match role {
             Role::Leader => self.metrics.inc(&self.metrics.lease_claims_succeeded),
             Role::Follower => self.metrics.inc(&self.metrics.lease_claims_failed),
+            Role::Client | Role::LatentWriter => {
+                unreachable!("lease claiming only yields Leader or Follower")
+            }
         }
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -371,6 +374,9 @@ impl Coordinator {
                     caught_up: follower_caught_up,
                     position: follower_position,
                 })
+            }
+            Role::Client | Role::LatentWriter => {
+                unreachable!("lease claiming only yields Leader or Follower")
             }
         }
     }
@@ -571,6 +577,9 @@ impl Coordinator {
                     }
                 }
                 tracing::info!("Coordinator: '{}' left (was Follower)", name);
+            }
+            Role::Client | Role::LatentWriter => {
+                tracing::info!("Coordinator: '{}' left (was {})", name, role);
             }
         }
 

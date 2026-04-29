@@ -320,6 +320,9 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                             ctx.metrics.inc(&ctx.metrics.lease_claims_failed);
                             consecutive_expired = 0;
                         }
+                        Ok(crate::Role::Client | crate::Role::LatentWriter) => {
+                            unreachable!("lease claiming only yields Leader or Follower")
+                        }
                         Err(e) => {
                             ctx.metrics.inc(&ctx.metrics.lease_claims_failed);
                             tracing::error!(

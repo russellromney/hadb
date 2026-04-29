@@ -51,9 +51,9 @@ turbodb defines three user-facing durability presets. Each maps to a `(hadb repl
 |------|-------------------|--------------|----------|
 | `Checkpoint` | on checkpoint only | none | Dev / single-node / tests |
 | `Continuous` | on checkpoint + WAL ships ~1s | yes | Production default |
-| `Cloud` | every commit, before ack | none | Multi-writer (Shared mode) |
+| `Cloud` | every commit, before ack | none | Multi-writer (SharedWriter mode) |
 
-`Continuous` is the default. `Cloud` is required for `HaMode::Shared` because multiple writers need every write visible immediately. `Checkpoint` is best for local-only workloads where crash recovery from the last checkpoint is acceptable.
+`Continuous` is the default. `Cloud` is required for `HaMode::SharedWriter` because multiple writers need every write visible immediately. `Checkpoint` is best for local-only workloads where crash recovery from the last checkpoint is acceptable.
 
 ## Key concepts
 
