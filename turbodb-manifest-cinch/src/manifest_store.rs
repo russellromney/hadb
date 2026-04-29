@@ -34,8 +34,12 @@
 //! was effectively vestigial. Now both sides speak the same msgpack
 //! wire.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use hadb_lease::FenceSource;
 use hadb_storage::CasResult;
 use reqwest::header::{CONTENT_TYPE, IF_MATCH};
 use serde::Deserialize;
@@ -53,6 +57,8 @@ pub struct CinchManifestStore {
     client: reqwest::Client,
     endpoint: String,
     token: String,
+    fence: Option<Arc<dyn FenceSource>>,
+    max_retries: u32,
 }
 
 impl CinchManifestStore {
@@ -69,6 +75,8 @@ impl CinchManifestStore {
             client,
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            fence: None,
+            max_retries: 3,
         }
     }
 
@@ -78,7 +86,16 @@ impl CinchManifestStore {
             client,
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            fence: None,
+            max_retries: 3,
         }
+    }
+
+    /// Attach a fence source. Manifest writes will require a current lease
+    /// revision and send `Fence-Token` headers.
+    pub fn with_fence(mut self, fence: Arc<dyn FenceSource>) -> Self {
+        self.fence = Some(fence);
+        self
     }
 
     fn manifest_url(&self, key: &str) -> String {
@@ -87,6 +104,31 @@ impl CinchManifestStore {
             self.endpoint,
             urlencoding::encode(key)
         )
+    }
+
+    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.token.is_empty() {
+            req
+        } else {
+            req.bearer_auth(&self.token)
+        }
+    }
+
+    fn apply_fence(&self, req: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+        match &self.fence {
+            Some(fence) => {
+                let rev = fence
+                    .require()
+                    .map_err(|_| anyhow!("no active lease; refusing manifest write"))?;
+                Ok(req.header("Fence-Token", rev.to_string()))
+            }
+            None => Ok(req),
+        }
+    }
+
+    async fn backoff(&self, attempt: u32) {
+        let ms = 10u64.saturating_mul(1u64 << attempt.min(8));
+        tokio::time::sleep(Duration::from_millis(ms)).await;
     }
 }
 
@@ -112,9 +154,7 @@ mod urlencoding {
 impl ManifestStore for CinchManifestStore {
     async fn get(&self, key: &str) -> Result<Option<Manifest>> {
         let resp = self
-            .client
-            .get(&self.manifest_url(key))
-            .bearer_auth(&self.token)
+            .auth(self.client.get(&self.manifest_url(key)))
             .header(reqwest::header::ACCEPT, CONTENT_TYPE_MSGPACK)
             .send()
             .await
@@ -144,56 +184,68 @@ impl ManifestStore for CinchManifestStore {
         manifest: &Manifest,
         expected_version: Option<u64>,
     ) -> Result<CasResult> {
-        let body = rmp_serde::to_vec(manifest)
-            .map_err(|e| anyhow!("encode msgpack manifest: {}", e))?;
+        let body =
+            rmp_serde::to_vec(manifest).map_err(|e| anyhow!("encode msgpack manifest: {}", e))?;
+        let mut attempt = 0u32;
+        loop {
+            let mut req = self
+                .auth(self.client.put(&self.manifest_url(key)))
+                .header(CONTENT_TYPE, CONTENT_TYPE_MSGPACK)
+                .body(body.clone());
 
-        let mut req = self
-            .client
-            .put(&self.manifest_url(key))
-            .bearer_auth(&self.token)
-            .header(CONTENT_TYPE, CONTENT_TYPE_MSGPACK)
-            .body(body);
-
-        if let Some(v) = expected_version {
-            req = req.header(IF_MATCH, v.to_string());
-        }
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| anyhow!("HTTP manifest put failed: {}", e))?;
-
-        match resp.status() {
-            reqwest::StatusCode::CREATED | reqwest::StatusCode::OK => {
-                let bytes = resp
-                    .bytes()
-                    .await
-                    .map_err(|e| anyhow!("read put response bytes: {}", e))?;
-                let body: ManifestPutResponse = rmp_serde::from_slice(&bytes)
-                    .map_err(|e| anyhow!("decode msgpack put response: {}", e))?;
-                Ok(CasResult {
-                    success: true,
-                    etag: Some(body.etag),
-                })
+            if let Some(v) = expected_version {
+                req = req.header(IF_MATCH, v.to_string());
             }
-            reqwest::StatusCode::CONFLICT | reqwest::StatusCode::PRECONDITION_FAILED => {
-                Ok(CasResult {
-                    success: false,
-                    etag: None,
-                })
-            }
-            status => {
-                let text = resp.text().await.unwrap_or_default();
-                Err(anyhow!("HTTP manifest put returned {}: {}", status, text))
+
+            let req = self.apply_fence(req)?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| anyhow!("HTTP manifest put failed: {}", e))?;
+
+            match resp.status() {
+                reqwest::StatusCode::CREATED | reqwest::StatusCode::OK => {
+                    let bytes = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| anyhow!("read put response bytes: {}", e))?;
+                    let body: ManifestPutResponse = rmp_serde::from_slice(&bytes)
+                        .map_err(|e| anyhow!("decode msgpack put response: {}", e))?;
+                    return Ok(CasResult {
+                        success: true,
+                        etag: Some(body.etag),
+                    });
+                }
+                reqwest::StatusCode::CONFLICT => {
+                    return Ok(CasResult {
+                        success: false,
+                        etag: None,
+                    });
+                }
+                reqwest::StatusCode::PRECONDITION_FAILED => {
+                    attempt += 1;
+                    if attempt >= self.max_retries {
+                        let text = resp.text().await.unwrap_or_default();
+                        return Err(anyhow!(
+                            "HTTP manifest put returned {} after {} attempts: {}",
+                            reqwest::StatusCode::PRECONDITION_FAILED,
+                            attempt,
+                            text
+                        ));
+                    }
+                    self.backoff(attempt).await;
+                }
+                status => {
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(anyhow!("HTTP manifest put returned {}: {}", status, text));
+                }
             }
         }
     }
 
     async fn meta(&self, key: &str) -> Result<Option<ManifestMeta>> {
         let resp = self
-            .client
-            .head(&self.manifest_url(key))
-            .bearer_auth(&self.token)
+            .auth(self.client.head(&self.manifest_url(key)))
             .send()
             .await
             .map_err(|e| anyhow!("HTTP manifest meta failed: {}", e))?;
@@ -217,10 +269,7 @@ impl ManifestStore for CinchManifestStore {
                     .map_err(|e| anyhow!("invalid X-Writer-Id: {}", e))?
                     .to_string();
 
-                Ok(Some(ManifestMeta {
-                    version,
-                    writer_id,
-                }))
+                Ok(Some(ManifestMeta { version, writer_id }))
             }
             reqwest::StatusCode::NOT_FOUND => Ok(None),
             status => {
@@ -246,6 +295,7 @@ mod tests {
         routing::{get, head, put},
         Router,
     };
+    use hadb_lease::FenceSource;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -253,12 +303,21 @@ mod tests {
     #[derive(Clone)]
     struct MockState {
         store: Arc<Mutex<HashMap<String, Manifest>>>,
+        required_fence: Option<u64>,
     }
 
     impl MockState {
         fn new() -> Self {
             Self {
                 store: Arc::new(Mutex::new(HashMap::new())),
+                required_fence: None,
+            }
+        }
+
+        fn with_required_fence(required_fence: u64) -> Self {
+            Self {
+                store: Arc::new(Mutex::new(HashMap::new())),
+                required_fence: Some(required_fence),
             }
         }
     }
@@ -275,10 +334,7 @@ mod tests {
         resp
     }
 
-    async fn mock_get(
-        State(state): State<MockState>,
-        Query(params): Query<KeyParam>,
-    ) -> Response {
+    async fn mock_get(State(state): State<MockState>, Query(params): Query<KeyParam>) -> Response {
         let store = state.store.lock().await;
         match store.get(&params.key) {
             Some(manifest) => {
@@ -306,6 +362,16 @@ mod tests {
             },
             None => None,
         };
+        if let Some(required_fence) = state.required_fence {
+            let provided_fence = headers
+                .get("Fence-Token")
+                .or_else(|| headers.get("fence-token"))
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+            if provided_fence != Some(required_fence) {
+                return StatusCode::PRECONDITION_FAILED.into_response();
+            }
+        }
 
         let mut store = state.store.lock().await;
         match (expected, store.get(&params.key).cloned()) {
@@ -322,18 +388,16 @@ mod tests {
                 let mut m = incoming;
                 m.version = new_version;
                 store.insert(params.key, m);
-                let body = rmp_serde::to_vec(&serde_json::json!({ "etag": new_version.to_string() }))
-                    .expect("encode");
+                let body =
+                    rmp_serde::to_vec(&serde_json::json!({ "etag": new_version.to_string() }))
+                        .expect("encode");
                 msgpack_response(StatusCode::OK, body)
             }
             _ => StatusCode::CONFLICT.into_response(),
         }
     }
 
-    async fn mock_head(
-        State(state): State<MockState>,
-        Query(params): Query<KeyParam>,
-    ) -> Response {
+    async fn mock_head(State(state): State<MockState>, Query(params): Query<KeyParam>) -> Response {
         let store = state.store.lock().await;
         match store.get(&params.key) {
             Some(manifest) => {
@@ -342,10 +406,7 @@ mod tests {
                     "X-Manifest-Version",
                     manifest.version.to_string().parse().expect("header"),
                 );
-                headers.insert(
-                    "X-Writer-Id",
-                    manifest.writer_id.parse().expect("header"),
-                );
+                headers.insert("X-Writer-Id", manifest.writer_id.parse().expect("header"));
                 (StatusCode::OK, headers).into_response()
             }
             None => StatusCode::NOT_FOUND.into_response(),
@@ -361,7 +422,12 @@ mod tests {
     }
 
     async fn start_mock_server() -> (String, tokio::task::JoinHandle<()>) {
-        let state = MockState::new();
+        start_mock_server_with_state(MockState::new()).await
+    }
+
+    async fn start_mock_server_with_state(
+        state: MockState,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let app = mock_app(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -381,6 +447,14 @@ mod tests {
             writer_id: writer.to_string(),
             timestamp_ms: 1000,
             payload: b"test-payload".to_vec(),
+        }
+    }
+
+    struct StaticFence(Option<u64>);
+
+    impl FenceSource for StaticFence {
+        fn current(&self) -> Option<u64> {
+            self.0
         }
     }
 
@@ -503,7 +577,10 @@ mod tests {
         store.put("db1", &m, None).await.expect("create");
 
         let fetched = store.get("db1").await.unwrap().unwrap();
-        assert_eq!(fetched.version, 1, "store must assign version, not use caller's");
+        assert_eq!(
+            fetched.version, 1,
+            "store must assign version, not use caller's"
+        );
     }
 
     #[tokio::test]
@@ -545,5 +622,34 @@ mod tests {
 
         let fetched = store.get("db1").await.expect("get").expect("exists");
         assert_eq!(fetched.payload, payload, "binary payload must round-trip");
+    }
+
+    #[tokio::test]
+    async fn test_put_with_required_fence_succeeds() {
+        let (url, _h) = start_mock_server_with_state(MockState::with_required_fence(7)).await;
+        let store =
+            CinchManifestStore::new(&url, "test-token").with_fence(Arc::new(StaticFence(Some(7))));
+
+        let res = store
+            .put("db1", &make_manifest("node-1"), None)
+            .await
+            .expect("put");
+        assert!(res.success);
+        assert_eq!(res.etag.as_deref(), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn test_put_without_required_fence_fails() {
+        let (url, _h) = start_mock_server_with_state(MockState::with_required_fence(7)).await;
+        let store = CinchManifestStore::new(&url, "test-token");
+
+        let err = store
+            .put("db1", &make_manifest("node-1"), None)
+            .await
+            .expect_err("missing fence must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("HTTP manifest put returned"));
+        assert!(msg.contains("412"));
+        assert!(msg.contains("after 3 attempts"));
     }
 }

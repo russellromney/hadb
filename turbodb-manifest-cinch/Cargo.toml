@@ -12,6 +12,7 @@ categories = ["database", "network-programming"]
 [dependencies]
 turbodb = { path = "../turbodb", version = "0.4.0" }
 hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+hadb-lease = { path = "../hadb-lease", version = "0.4.0" }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
