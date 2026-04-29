@@ -350,10 +350,7 @@ mod tests {
         for k in ["a/1", "a/2", "a/3"] {
             s.put(k, b"").await.unwrap();
         }
-        assert_eq!(
-            s.list("a/", Some("a/1")).await.unwrap(),
-            vec!["a/2", "a/3"]
-        );
+        assert_eq!(s.list("a/", Some("a/1")).await.unwrap(), vec!["a/2", "a/3"]);
     }
 
     #[tokio::test]
@@ -409,7 +406,10 @@ mod tests {
         // Etag changes are based on mtime-nanos + size; if fs mtime granularity
         // is coarse the nanos may tie. Forcing a length change makes size differ
         // and guarantees a distinct etag.
-        let b = s.put_if_match("k", b"v2-different-length", &e1).await.unwrap();
+        let b = s
+            .put_if_match("k", b"v2-different-length", &e1)
+            .await
+            .unwrap();
         assert!(b.success);
         let e2 = b.etag.unwrap();
         assert_ne!(e1, e2);

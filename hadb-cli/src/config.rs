@@ -265,7 +265,10 @@ ttl_secs = "not-a-number"
 
         let result: Result<(SharedConfig, TestProduct)> =
             load_config(Some(config_path.as_path()), "badtype.toml");
-        assert!(result.is_err(), "expected type error for string in u64 field");
+        assert!(
+            result.is_err(),
+            "expected type error for string in u64 field"
+        );
     }
 
     #[test]

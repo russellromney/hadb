@@ -90,9 +90,7 @@ fn trigger_flaky(state: &MockState) -> bool {
     if prev == 0 {
         return false;
     }
-    state
-        .flaky_write_failures
-        .fetch_sub(1, Ordering::SeqCst);
+    state.flaky_write_failures.fetch_sub(1, Ordering::SeqCst);
     true
 }
 
@@ -207,9 +205,7 @@ async fn mock_list(
     // Protocol-violation simulator: return empty-but-truncated for the
     // configured number of responses, then behave normally.
     if state.empty_truncated_count.load(Ordering::SeqCst) > 0 {
-        state
-            .empty_truncated_count
-            .fetch_sub(1, Ordering::SeqCst);
+        state.empty_truncated_count.fetch_sub(1, Ordering::SeqCst);
         return Ok(Json(serde_json::json!({
             "keys": Vec::<String>::new(),
             "is_truncated": true,
@@ -507,7 +503,9 @@ async fn write_retries_on_412_when_fence_advances() {
     });
 
     // Should succeed after retrying with the updated fence.
-    s.put("race", b"v").await.expect("put should retry past 412");
+    s.put("race", b"v")
+        .await
+        .expect("put should retry past 412");
     assert_eq!(s.get("race").await.unwrap().unwrap(), b"v");
 }
 
@@ -547,8 +545,7 @@ async fn reads_do_not_require_fence() {
     {
         let (fence, writer) = AtomicFence::new();
         writer.set(7);
-        let writer_store =
-            store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
+        let writer_store = store(&url, "tok").with_fence(Arc::new(fence) as Arc<dyn FenceSource>);
         writer_store.put("k", b"v").await.unwrap();
     }
 
@@ -586,10 +583,7 @@ async fn batch_delete_uses_fence() {
 
     s.put("a", b"").await.unwrap();
     s.put("b", b"").await.unwrap();
-    let deleted = s
-        .delete_many(&["a".into(), "b".into()])
-        .await
-        .unwrap();
+    let deleted = s.delete_many(&["a".into(), "b".into()]).await.unwrap();
     assert_eq!(deleted, 2);
 }
 
@@ -660,10 +654,7 @@ async fn delete_many_fails_on_server_reported_failures() {
     s.put("b", b"").await.unwrap();
 
     // Server will report 1 key failed; client must return Err.
-    let err = s
-        .delete_many(&["a".into(), "b".into()])
-        .await
-        .unwrap_err();
+    let err = s.delete_many(&["a".into(), "b".into()]).await.unwrap_err();
     assert!(
         err.to_string().contains("failed"),
         "expected per-key-failure error, got: {err}"
@@ -679,13 +670,7 @@ async fn url_unsafe_keys_roundtrip() {
     let s = store(&url, "tok");
 
     // Keys with ?, #, space, %, and unicode must all roundtrip correctly.
-    let keys = [
-        "foo?bar",
-        "a b/c",
-        "100%",
-        "tag#1",
-        "ünïcödé/x",
-    ];
+    let keys = ["foo?bar", "a b/c", "100%", "tag#1", "ünïcödé/x"];
     for k in &keys {
         s.put(k, k.as_bytes()).await.unwrap();
     }

@@ -142,11 +142,7 @@ impl WebhookSender {
             }
 
             if let Err(e) = self.send_to_webhook(config, &payload).await {
-                tracing::error!(
-                    "Failed to send webhook to {}: {}",
-                    config.url,
-                    e
-                );
+                tracing::error!("Failed to send webhook to {}: {}", config.url, e);
             }
         }
     }
@@ -163,7 +159,10 @@ impl WebhookSender {
             .client
             .post(&config.url)
             .header("Content-Type", "application/json")
-            .header("User-Agent", format!("hadb-io/{}", env!("CARGO_PKG_VERSION")));
+            .header(
+                "User-Agent",
+                format!("hadb-io/{}", env!("CARGO_PKG_VERSION")),
+            );
 
         // Add HMAC signature if secret is configured
         if let Some(ref secret) = config.secret {
@@ -201,8 +200,7 @@ impl WebhookSender {
 
     /// Send corruption_detected notification.
     pub async fn notify_corruption(&self, database: &str, error: &str) {
-        let payload =
-            WebhookPayload::new(WebhookEvent::CorruptionDetected, database, error, 0);
+        let payload = WebhookPayload::new(WebhookEvent::CorruptionDetected, database, error, 0);
         self.send(payload).await;
     }
 

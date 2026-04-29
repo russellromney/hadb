@@ -78,12 +78,7 @@ pub trait StorageBackend: Send + Sync {
 
     /// Byte-range GET. Default implementation fetches the full object and
     /// slices. Override when the backend supports Range headers (S3, HTTP).
-    async fn range_get(
-        &self,
-        key: &str,
-        start: u64,
-        len: u32,
-    ) -> Result<Option<Vec<u8>>> {
+    async fn range_get(&self, key: &str, start: u64, len: u32) -> Result<Option<Vec<u8>>> {
         match self.get(key).await? {
             None => Ok(None),
             Some(bytes) => {

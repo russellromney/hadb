@@ -281,10 +281,7 @@ mod tests {
         assert_eq!(Tier::classify(now, now - Duration::hours(25)), Tier::Daily);
         assert_eq!(Tier::classify(now, now - Duration::days(6)), Tier::Daily);
         assert_eq!(Tier::classify(now, now - Duration::days(8)), Tier::Weekly);
-        assert_eq!(
-            Tier::classify(now, now - Duration::weeks(11)),
-            Tier::Weekly
-        );
+        assert_eq!(Tier::classify(now, now - Duration::weeks(11)), Tier::Weekly);
         assert_eq!(
             Tier::classify(now, now - Duration::weeks(13)),
             Tier::Monthly

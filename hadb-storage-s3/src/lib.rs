@@ -49,6 +49,7 @@ pub const DEFAULT_MAX_RETRIES: u32 = 3;
 /// Construct with an `aws_sdk_s3::Client` or convenience constructor
 /// `from_env`. Cheap to clone: the client is an `Arc` internally and
 /// the metrics counters are `Arc<AtomicU64>`.
+#[derive(Clone)]
 pub struct S3Storage {
     client: Client,
     bucket: String,
@@ -188,7 +189,9 @@ impl StorageBackend for S3Storage {
                 Err(e) => {
                     attempt += 1;
                     if attempt >= self.max_retries {
-                        return Err(anyhow!("S3 GET {full} failed after {attempt} attempts: {e}"));
+                        return Err(anyhow!(
+                            "S3 GET {full} failed after {attempt} attempts: {e}"
+                        ));
                     }
                     tracing::debug!("S3 GET {full} attempt {attempt} failed: {e}; retrying");
                     self.backoff(attempt).await;
@@ -220,7 +223,9 @@ impl StorageBackend for S3Storage {
                 Err(e) => {
                     attempt += 1;
                     if attempt >= self.max_retries {
-                        return Err(anyhow!("S3 PUT {full} failed after {attempt} attempts: {e}"));
+                        return Err(anyhow!(
+                            "S3 PUT {full} failed after {attempt} attempts: {e}"
+                        ));
                     }
                     tracing::debug!("S3 PUT {full} attempt {attempt} failed: {e}; retrying");
                     self.backoff(attempt).await;
@@ -512,7 +517,12 @@ impl StorageBackend for S3Storage {
         for chunk in keys.chunks(1000) {
             let objects: Vec<ObjectIdentifier> = chunk
                 .iter()
-                .filter_map(|k| ObjectIdentifier::builder().key(self.full_key(k)).build().ok())
+                .filter_map(|k| {
+                    ObjectIdentifier::builder()
+                        .key(self.full_key(k))
+                        .build()
+                        .ok()
+                })
                 .collect();
             if objects.is_empty() {
                 continue;

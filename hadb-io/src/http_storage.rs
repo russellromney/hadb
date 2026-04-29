@@ -107,7 +107,8 @@ impl HttpObjectStore {
                         return Err(anyhow!("HTTP request failed after 3 retries: {}", e));
                     }
                     warn!("HTTP request failed (retry {}/3): {}", retries, e);
-                    tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << retries))).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << retries)))
+                        .await;
                 }
             }
         }
@@ -118,19 +119,24 @@ impl HttpObjectStore {
 impl ObjectStore for HttpObjectStore {
     async fn upload_bytes(&self, key: &str, data: Vec<u8>) -> Result<()> {
         let url = self.url(key);
-        let resp = self.send_with_retry(|| {
-            self.with_fence(
-                self.client
-                    .put(&url)
-                    .bearer_auth(&self.token)
-                    .body(data.clone())
-            )
-        }).await
+        let resp = self
+            .send_with_retry(|| {
+                self.with_fence(
+                    self.client
+                        .put(&url)
+                        .bearer_auth(&self.token)
+                        .body(data.clone()),
+                )
+            })
+            .await
             .with_context(|| format!("HTTP upload failed: {}", key))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_else(|_| "<error reading body>".to_string());
+            let text = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "<error reading body>".to_string());
             return Err(anyhow!("HTTP upload {} returned {}: {}", key, status, text));
         }
         Ok(())
@@ -144,20 +150,25 @@ impl ObjectStore for HttpObjectStore {
     ) -> Result<()> {
         let url = self.url(key);
         let checksum = checksum.to_string();
-        let resp = self.send_with_retry(|| {
-            self.with_fence(
-                self.client
-                    .put(&url)
-                    .bearer_auth(&self.token)
-                    .header("x-checksum-sha256", &checksum)
-                    .body(data.clone())
-            )
-        }).await
+        let resp = self
+            .send_with_retry(|| {
+                self.with_fence(
+                    self.client
+                        .put(&url)
+                        .bearer_auth(&self.token)
+                        .header("x-checksum-sha256", &checksum)
+                        .body(data.clone()),
+                )
+            })
+            .await
             .with_context(|| format!("HTTP upload failed: {}", key))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_else(|_| "<error reading body>".to_string());
+            let text = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "<error reading body>".to_string());
             return Err(anyhow!("HTTP upload {} returned {}: {}", key, status, text));
         }
         Ok(())
@@ -184,9 +195,9 @@ impl ObjectStore for HttpObjectStore {
 
     async fn download_bytes(&self, key: &str) -> Result<Vec<u8>> {
         let url = self.url(key);
-        let resp = self.send_with_retry(|| {
-            self.client.get(&url).bearer_auth(&self.token)
-        }).await
+        let resp = self
+            .send_with_retry(|| self.client.get(&url).bearer_auth(&self.token))
+            .await
             .with_context(|| format!("HTTP download failed: {}", key))?;
 
         match resp.status() {
@@ -197,12 +208,18 @@ impl ObjectStore for HttpObjectStore {
                     .with_context(|| format!("Failed to read body: {}", key))?;
                 Ok(bytes.to_vec())
             }
-            reqwest::StatusCode::NOT_FOUND => {
-                Err(anyhow!("Object not found: {}", key))
-            }
+            reqwest::StatusCode::NOT_FOUND => Err(anyhow!("Object not found: {}", key)),
             status => {
-                let text = resp.text().await.unwrap_or_else(|_| "<error reading body>".to_string());
-                Err(anyhow!("HTTP download {} returned {}: {}", key, status, text))
+                let text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<error reading body>".to_string());
+                Err(anyhow!(
+                    "HTTP download {} returned {}: {}",
+                    key,
+                    status,
+                    text
+                ))
             }
         }
     }
@@ -233,21 +250,32 @@ impl ObjectStore for HttpObjectStore {
 
             let list_url = self.list_url();
             let query_clone = query.clone();
-            let resp = self.send_with_retry(|| {
-                self.client
-                    .get(&list_url)
-                    .bearer_auth(&self.token)
-                    .query(&query_clone)
-            }).await
+            let resp = self
+                .send_with_retry(|| {
+                    self.client
+                        .get(&list_url)
+                        .bearer_auth(&self.token)
+                        .query(&query_clone)
+                })
+                .await
                 .with_context(|| format!("HTTP list failed: prefix={}", prefix))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_else(|_| "<error reading body>".to_string());
-                return Err(anyhow!("HTTP list prefix={} returned {}: {}", prefix, status, text));
+                let text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<error reading body>".to_string());
+                return Err(anyhow!(
+                    "HTTP list prefix={} returned {}: {}",
+                    prefix,
+                    status,
+                    text
+                ));
             }
 
-            let body: serde_json::Value = resp.json().await.context("Failed to parse list response")?;
+            let body: serde_json::Value =
+                resp.json().await.context("Failed to parse list response")?;
             let keys = body["keys"]
                 .as_array()
                 .ok_or_else(|| anyhow!("List response missing 'keys' array"))?;
@@ -273,9 +301,9 @@ impl ObjectStore for HttpObjectStore {
 
     async fn exists(&self, key: &str) -> Result<bool> {
         let url = self.url(key);
-        let resp = self.send_with_retry(|| {
-            self.client.head(&url).bearer_auth(&self.token)
-        }).await
+        let resp = self
+            .send_with_retry(|| self.client.head(&url).bearer_auth(&self.token))
+            .await
             .with_context(|| format!("HTTP exists check failed: {}", key))?;
 
         Ok(resp.status() == reqwest::StatusCode::OK)
@@ -283,9 +311,9 @@ impl ObjectStore for HttpObjectStore {
 
     async fn get_checksum(&self, key: &str) -> Result<Option<String>> {
         let url = self.url(key);
-        let resp = self.send_with_retry(|| {
-            self.client.head(&url).bearer_auth(&self.token)
-        }).await
+        let resp = self
+            .send_with_retry(|| self.client.head(&url).bearer_auth(&self.token))
+            .await
             .with_context(|| format!("HTTP head failed: {}", key))?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -304,15 +332,20 @@ impl ObjectStore for HttpObjectStore {
 
     async fn delete_object(&self, key: &str) -> Result<()> {
         let url = self.url(key);
-        let resp = self.send_with_retry(|| {
-            self.with_fence(self.client.delete(&url).bearer_auth(&self.token))
-        }).await
+        let resp = self
+            .send_with_retry(|| self.with_fence(self.client.delete(&url).bearer_auth(&self.token)))
+            .await
             .with_context(|| format!("HTTP delete failed: {}", key))?;
 
         match resp.status() {
-            reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::OK | reqwest::StatusCode::NOT_FOUND => Ok(()),
+            reqwest::StatusCode::NO_CONTENT
+            | reqwest::StatusCode::OK
+            | reqwest::StatusCode::NOT_FOUND => Ok(()),
             status => {
-                let text = resp.text().await.unwrap_or_else(|_| "<error reading body>".to_string());
+                let text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<error reading body>".to_string());
                 Err(anyhow!("HTTP delete {} returned {}: {}", key, status, text))
             }
         }
@@ -327,23 +360,29 @@ impl ObjectStore for HttpObjectStore {
 
         // Chunk at 1000 to match S3 batch delete limits
         for chunk in keys.chunks(1000) {
-            let resp = self.with_fence(
-                self.client
-                    .post(&self.batch_delete_url())
-                    .bearer_auth(&self.token)
-                    .json(&serde_json::json!({ "keys": chunk }))
-            )
+            let resp = self
+                .with_fence(
+                    self.client
+                        .post(&self.batch_delete_url())
+                        .bearer_auth(&self.token)
+                        .json(&serde_json::json!({ "keys": chunk })),
+                )
                 .send()
                 .await
                 .context("HTTP batch delete failed")?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_else(|_| "<error reading body>".to_string());
+                let text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<error reading body>".to_string());
                 return Err(anyhow!("HTTP batch delete returned {}: {}", status, text));
             }
 
-            let body: serde_json::Value = resp.json().await
+            let body: serde_json::Value = resp
+                .json()
+                .await
                 .context("Failed to parse batch delete response")?;
             let deleted = body["deleted"]
                 .as_u64()
@@ -569,9 +608,18 @@ mod tests {
         let (url, _h) = start_mock().await;
         let store = HttpObjectStore::new(&url, "test-token", "wal", no_fence());
 
-        store.upload_bytes("a", b"1".to_vec()).await.expect("upload");
-        store.upload_bytes("b", b"2".to_vec()).await.expect("upload");
-        store.upload_bytes("c", b"3".to_vec()).await.expect("upload");
+        store
+            .upload_bytes("a", b"1".to_vec())
+            .await
+            .expect("upload");
+        store
+            .upload_bytes("b", b"2".to_vec())
+            .await
+            .expect("upload");
+        store
+            .upload_bytes("c", b"3".to_vec())
+            .await
+            .expect("upload");
 
         // Single delete
         store.delete_object("a").await.expect("delete");
@@ -591,7 +639,10 @@ mod tests {
     async fn delete_idempotent() {
         let (url, _h) = start_mock().await;
         let store = HttpObjectStore::new(&url, "test-token", "wal", no_fence());
-        store.delete_object("never-existed").await.expect("delete nonexistent should succeed");
+        store
+            .delete_object("never-existed")
+            .await
+            .expect("delete nonexistent should succeed");
     }
 
     #[tokio::test]
@@ -599,9 +650,18 @@ mod tests {
         let (url, _h) = start_mock().await;
         let store = HttpObjectStore::new(&url, "test-token", "wal", no_fence());
 
-        store.upload_bytes("seg/001", b"1".to_vec()).await.expect("upload");
-        store.upload_bytes("seg/002", b"2".to_vec()).await.expect("upload");
-        store.upload_bytes("other/001", b"3".to_vec()).await.expect("upload");
+        store
+            .upload_bytes("seg/001", b"1".to_vec())
+            .await
+            .expect("upload");
+        store
+            .upload_bytes("seg/002", b"2".to_vec())
+            .await
+            .expect("upload");
+        store
+            .upload_bytes("other/001", b"3".to_vec())
+            .await
+            .expect("upload");
 
         let keys = store.list_objects("seg/").await.expect("list");
         assert_eq!(keys.len(), 2);
@@ -614,11 +674,23 @@ mod tests {
         let (url, _h) = start_mock().await;
         let store = HttpObjectStore::new(&url, "test-token", "wal", no_fence());
 
-        store.upload_bytes("seg/001", b"1".to_vec()).await.expect("upload");
-        store.upload_bytes("seg/002", b"2".to_vec()).await.expect("upload");
-        store.upload_bytes("seg/003", b"3".to_vec()).await.expect("upload");
+        store
+            .upload_bytes("seg/001", b"1".to_vec())
+            .await
+            .expect("upload");
+        store
+            .upload_bytes("seg/002", b"2".to_vec())
+            .await
+            .expect("upload");
+        store
+            .upload_bytes("seg/003", b"3".to_vec())
+            .await
+            .expect("upload");
 
-        let keys = store.list_objects_after("seg/", "seg/001").await.expect("list");
+        let keys = store
+            .list_objects_after("seg/", "seg/001")
+            .await
+            .expect("list");
         assert!(!keys.contains(&"seg/001".to_string()));
         assert!(keys.contains(&"seg/002".to_string()));
         assert!(keys.contains(&"seg/003".to_string()));
@@ -633,10 +705,18 @@ mod tests {
         let src = dir.path().join("source.bin");
         let dst = dir.path().join("dest.bin");
 
-        tokio::fs::write(&src, b"file content").await.expect("write");
+        tokio::fs::write(&src, b"file content")
+            .await
+            .expect("write");
 
-        store.upload_file("file-test", &src).await.expect("upload file");
-        store.download_file("file-test", &dst).await.expect("download file");
+        store
+            .upload_file("file-test", &src)
+            .await
+            .expect("upload file");
+        store
+            .download_file("file-test", &dst)
+            .await
+            .expect("download file");
 
         let content = tokio::fs::read(&dst).await.expect("read");
         assert_eq!(content, b"file content");

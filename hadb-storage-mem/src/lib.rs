@@ -283,10 +283,19 @@ mod tests {
     async fn etags_are_unique_per_write() {
         let s = MemStorage::new();
         let a = s.put_if_absent("k", b"v1").await.unwrap();
-        let b = s.put_if_match("k", b"v2", a.etag.as_ref().unwrap()).await.unwrap();
-        let c = s.put_if_match("k", b"v3", b.etag.as_ref().unwrap()).await.unwrap();
+        let b = s
+            .put_if_match("k", b"v2", a.etag.as_ref().unwrap())
+            .await
+            .unwrap();
+        let c = s
+            .put_if_match("k", b"v3", b.etag.as_ref().unwrap())
+            .await
+            .unwrap();
         let etags = [a.etag.unwrap(), b.etag.unwrap(), c.etag.unwrap()];
-        assert_eq!(etags.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        assert_eq!(
+            etags.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
     }
 
     // Compile-time: exercises the trait object shape our consumers depend on.

@@ -397,19 +397,14 @@ impl RetryPolicy {
                 }
                 Err(e) => {
                     let error_kind = classify_error(&e);
-                    let retryable =
-                        matches!(error_kind, ErrorKind::Transient | ErrorKind::Unknown);
+                    let retryable = matches!(error_kind, ErrorKind::Transient | ErrorKind::Unknown);
 
                     if let Some(cb) = &self.circuit_breaker {
                         cb.record_failure();
                     }
 
                     if !retryable {
-                        tracing::warn!(
-                            "Non-retryable error (kind={:?}): {}",
-                            error_kind,
-                            e
-                        );
+                        tracing::warn!("Non-retryable error (kind={:?}): {}", error_kind, e);
                         return Err(e);
                     }
 
@@ -503,10 +498,7 @@ mod tests {
             classify_error(&anyhow!("404 Not Found")),
             ErrorKind::NotFound
         );
-        assert_eq!(
-            classify_error(&anyhow!("No such key")),
-            ErrorKind::NotFound
-        );
+        assert_eq!(classify_error(&anyhow!("No such key")), ErrorKind::NotFound);
     }
 
     #[test]
@@ -791,7 +783,10 @@ mod tests {
 
         let result: Result<i32> = policy.execute(|| async { Ok(42) }).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Circuit breaker open"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Circuit breaker open"));
     }
 
     #[tokio::test]

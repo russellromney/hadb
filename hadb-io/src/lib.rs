@@ -27,17 +27,19 @@ pub mod s3;
 pub use aws_sdk_s3;
 
 // Re-export primary types for convenience
-pub use config::{CacheConfig, S3Config, WebhookConfig};
 pub use config::parse_duration_string;
-pub use retention::{RetentionPlan, RetentionPolicy, SnapshotEntry, Tier, analyze_retention};
+pub use config::{CacheConfig, S3Config, WebhookConfig};
+pub use http_storage::HttpObjectStore;
+pub use retention::{analyze_retention, RetentionPlan, RetentionPolicy, SnapshotEntry, Tier};
 pub use retry::{
-    CircuitBreaker, CircuitState, ErrorKind, OnCircuitOpen, RetryConfig, RetryOutcome,
-    RetryPolicy, classify_error, is_retryable,
+    classify_error, is_retryable, CircuitBreaker, CircuitState, ErrorKind, OnCircuitOpen,
+    RetryConfig, RetryOutcome, RetryPolicy,
 };
 pub use storage::ObjectStore;
-pub use http_storage::HttpObjectStore;
-pub use uploader::{ConcurrentUploader, UploadHandler, UploadMessage, UploaderStats, spawn_uploader};
-pub use webhook::{WebhookEvent, WebhookPayload, WebhookSender, compute_hmac_signature};
+pub use uploader::{
+    spawn_uploader, ConcurrentUploader, UploadHandler, UploadMessage, UploaderStats,
+};
+pub use webhook::{compute_hmac_signature, WebhookEvent, WebhookPayload, WebhookSender};
 
 #[cfg(feature = "s3")]
 pub use storage::S3Backend;

@@ -37,8 +37,7 @@ pub fn apply_physical(
         let offset = page.page_id.to_u64() * page_size;
         file.seek(SeekFrom::Start(offset))
             .map_err(ChangesetError::Io)?;
-        file.write_all(&page.data)
-            .map_err(ChangesetError::Io)?;
+        file.write_all(&page.data).map_err(ChangesetError::Io)?;
     }
 
     file.sync_all().map_err(ChangesetError::Io)?;
@@ -54,25 +53,37 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn page_u32(id: u32, fill: u8, len: usize) -> PageEntry {
-        PageEntry { page_id: PageId::U32(id), data: vec![fill; len] }
+        PageEntry {
+            page_id: PageId::U32(id),
+            data: vec![fill; len],
+        }
     }
 
     fn page_u64(id: u64, fill: u8, len: usize) -> PageEntry {
-        PageEntry { page_id: PageId::U64(id), data: vec![fill; len] }
+        PageEntry {
+            page_id: PageId::U64(id),
+            data: vec![fill; len],
+        }
     }
 
     #[test]
     fn test_apply_single_changeset() {
         let tmp = NamedTempFile::new().unwrap();
-        let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![
-            page_u64(0, 0xAA, 64),
-            page_u64(1, 0xBB, 128),
-        ]);
+        let cs = PhysicalChangeset::new(
+            1,
+            0,
+            PageIdSize::U64,
+            262144,
+            vec![page_u64(0, 0xAA, 64), page_u64(1, 0xBB, 128)],
+        );
         let checksum = apply_physical(tmp.path(), &cs, 0).unwrap();
         assert_eq!(checksum, cs.checksum);
 
         let mut contents = Vec::new();
-        std::fs::File::open(tmp.path()).unwrap().read_to_end(&mut contents).unwrap();
+        std::fs::File::open(tmp.path())
+            .unwrap()
+            .read_to_end(&mut contents)
+            .unwrap();
         assert_eq!(&contents[0..64], &vec![0xAA; 64]);
         assert_eq!(&contents[262144..262144 + 128], &vec![0xBB; 128]);
     }
@@ -80,10 +91,12 @@ mod tests {
     #[test]
     fn test_apply_chain() {
         let tmp = NamedTempFile::new().unwrap();
-        let cs1 = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
+        let cs1 =
+            PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
         let ck1 = apply_physical(tmp.path(), &cs1, 0).unwrap();
 
-        let cs2 = PhysicalChangeset::new(2, ck1, PageIdSize::U64, 262144, vec![page_u64(1, 0xBB, 64)]);
+        let cs2 =
+            PhysicalChangeset::new(2, ck1, PageIdSize::U64, 262144, vec![page_u64(1, 0xBB, 64)]);
         let ck2 = apply_physical(tmp.path(), &cs2, ck1).unwrap();
         assert_ne!(ck1, ck2);
     }
@@ -91,10 +104,12 @@ mod tests {
     #[test]
     fn test_apply_overwrites_page() {
         let tmp = NamedTempFile::new().unwrap();
-        let cs1 = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
+        let cs1 =
+            PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
         let ck1 = apply_physical(tmp.path(), &cs1, 0).unwrap();
 
-        let cs2 = PhysicalChangeset::new(2, ck1, PageIdSize::U64, 262144, vec![page_u64(0, 0xBB, 64)]);
+        let cs2 =
+            PhysicalChangeset::new(2, ck1, PageIdSize::U64, 262144, vec![page_u64(0, 0xBB, 64)]);
         apply_physical(tmp.path(), &cs2, ck1).unwrap();
 
         let contents = std::fs::read(tmp.path()).unwrap();
@@ -131,7 +146,8 @@ mod tests {
     #[test]
     fn test_apply_extends_file() {
         let tmp = NamedTempFile::new().unwrap();
-        let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(10, 0xFF, 64)]);
+        let cs =
+            PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(10, 0xFF, 64)]);
         apply_physical(tmp.path(), &cs, 0).unwrap();
         let contents = std::fs::read(tmp.path()).unwrap();
         let offset = 10 * 262144;
@@ -142,10 +158,13 @@ mod tests {
     #[test]
     fn test_apply_u32_pages_4kb() {
         let tmp = NamedTempFile::new().unwrap();
-        let cs = PhysicalChangeset::new(1, 0, PageIdSize::U32, 4096, vec![
-            page_u32(1, 0xAA, 4096),
-            page_u32(2, 0xBB, 4096),
-        ]);
+        let cs = PhysicalChangeset::new(
+            1,
+            0,
+            PageIdSize::U32,
+            4096,
+            vec![page_u32(1, 0xAA, 4096), page_u32(2, 0xBB, 4096)],
+        );
         apply_physical(tmp.path(), &cs, 0).unwrap();
         let contents = std::fs::read(tmp.path()).unwrap();
         assert_eq!(&contents[4096..4096 + 4096], &vec![0xAA; 4096]);

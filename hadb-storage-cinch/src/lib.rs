@@ -180,6 +180,15 @@ impl CinchHttpStorage {
         format!("{}/v1/sync/{}/_delete", self.endpoint, encoded_prefix)
     }
 
+    /// Add `Authorization: Bearer` header when a non-empty token is configured.
+    fn auth(&self, req: RequestBuilder) -> RequestBuilder {
+        if self.token.is_empty() {
+            req
+        } else {
+            req.bearer_auth(&self.token)
+        }
+    }
+
     /// Add `Fence-Token` header to a write. Returns an error if a fence is
     /// configured but no lease is currently held.
     fn apply_fence(&self, req: RequestBuilder) -> Result<RequestBuilder> {
@@ -239,12 +248,7 @@ impl StorageBackend for CinchHttpStorage {
         let url = self.object_url(key);
         let mut attempt = 0u32;
         loop {
-            let resp = self
-                .client
-                .get(&url)
-                .bearer_auth(&self.token)
-                .send()
-                .await;
+            let resp = self.auth(self.client.get(&url)).send().await;
             match resp {
                 Ok(r) if r.status() == StatusCode::OK => {
                     let bytes = r.bytes().await?.to_vec();
@@ -287,11 +291,7 @@ impl StorageBackend for CinchHttpStorage {
         let len = data.len() as u64;
         let mut attempt = 0u32;
         loop {
-            let req = self
-                .client
-                .put(&url)
-                .bearer_auth(&self.token)
-                .body(data.to_vec());
+            let req = self.auth(self.client.put(&url)).body(data.to_vec());
             let req = self.apply_fence(req)?;
             match req.send().await {
                 Ok(r) if r.status().is_success() => {
@@ -334,7 +334,7 @@ impl StorageBackend for CinchHttpStorage {
         let url = self.object_url(key);
         let mut attempt = 0u32;
         loop {
-            let req = self.client.delete(&url).bearer_auth(&self.token);
+            let req = self.auth(self.client.delete(&url));
             let req = self.apply_fence(req)?;
             match req.send().await {
                 Ok(r)
@@ -388,9 +388,7 @@ impl StorageBackend for CinchHttpStorage {
                 }
             }
             let resp = self
-                .client
-                .get(&url)
-                .bearer_auth(&self.token)
+                .auth(self.client.get(&url))
                 .query(&query)
                 .send()
                 .await
@@ -438,12 +436,7 @@ impl StorageBackend for CinchHttpStorage {
         let url = self.object_url(key);
         let mut attempt = 0u32;
         loop {
-            let resp = self
-                .client
-                .head(&url)
-                .bearer_auth(&self.token)
-                .send()
-                .await;
+            let resp = self.auth(self.client.head(&url)).send().await;
             match resp {
                 Ok(r) if r.status() == StatusCode::OK => return Ok(true),
                 Ok(r) if r.status() == StatusCode::NOT_FOUND => return Ok(false),
@@ -481,9 +474,7 @@ impl StorageBackend for CinchHttpStorage {
         let mut attempt = 0u32;
         loop {
             let req = self
-                .client
-                .put(&url)
-                .bearer_auth(&self.token)
+                .auth(self.client.put(&url))
                 .header("If-None-Match", "*")
                 .body(data.to_vec());
             let req = self.apply_fence(req)?;
@@ -497,8 +488,9 @@ impl StorageBackend for CinchHttpStorage {
                         etag,
                     });
                 }
-                Ok(r) if r.status() == StatusCode::PRECONDITION_FAILED
-                    || r.status() == StatusCode::CONFLICT =>
+                Ok(r)
+                    if r.status() == StatusCode::PRECONDITION_FAILED
+                        || r.status() == StatusCode::CONFLICT =>
                 {
                     // CAS signal, not transient; do not retry.
                     return Ok(CasResult {
@@ -540,9 +532,7 @@ impl StorageBackend for CinchHttpStorage {
         let mut attempt = 0u32;
         loop {
             let req = self
-                .client
-                .put(&url)
-                .bearer_auth(&self.token)
+                .auth(self.client.put(&url))
                 .header("If-Match", etag)
                 .body(data.to_vec());
             let req = self.apply_fence(req)?;
@@ -556,8 +546,9 @@ impl StorageBackend for CinchHttpStorage {
                         etag: new_etag,
                     });
                 }
-                Ok(r) if r.status() == StatusCode::PRECONDITION_FAILED
-                    || r.status() == StatusCode::CONFLICT =>
+                Ok(r)
+                    if r.status() == StatusCode::PRECONDITION_FAILED
+                        || r.status() == StatusCode::CONFLICT =>
                 {
                     return Ok(CasResult {
                         success: false,
@@ -603,14 +594,15 @@ impl StorageBackend for CinchHttpStorage {
         let mut attempt = 0u32;
         loop {
             let resp = self
-                .client
-                .get(&url)
-                .bearer_auth(&self.token)
+                .auth(self.client.get(&url))
                 .header("Range", &range)
                 .send()
                 .await;
             match resp {
-                Ok(r) if r.status() == StatusCode::OK || r.status() == StatusCode::PARTIAL_CONTENT => {
+                Ok(r)
+                    if r.status() == StatusCode::OK
+                        || r.status() == StatusCode::PARTIAL_CONTENT =>
+                {
                     let bytes = r.bytes().await?.to_vec();
                     self.fetch_count.fetch_add(1, Ordering::Relaxed);
                     self.fetch_bytes
@@ -660,9 +652,7 @@ impl StorageBackend for CinchHttpStorage {
             let mut attempt = 0u32;
             let resp = loop {
                 let req = self
-                    .client
-                    .post(&url)
-                    .bearer_auth(&self.token)
+                    .auth(self.client.post(&url))
                     .json(&serde_json::json!({ "keys": chunk }));
                 let req = self.apply_fence(req)?;
                 match req.send().await {
@@ -708,10 +698,7 @@ impl StorageBackend for CinchHttpStorage {
                     "batch-DELETE {url}: {} of {} keys failed; first failure: {}",
                     body.failed.len(),
                     chunk.len(),
-                    body.failed
-                        .first()
-                        .map(|f| f.as_str())
-                        .unwrap_or("<none>"),
+                    body.failed.first().map(|f| f.as_str()).unwrap_or("<none>"),
                 ));
             }
             total += body.deleted;

@@ -106,10 +106,7 @@ impl<H: UploadHandler> ConcurrentUploader<H> {
     }
 
     /// Run the uploader loop. Blocks until Shutdown or channel close.
-    pub async fn run(
-        &self,
-        mut rx: mpsc::Receiver<UploadMessage<H::Id>>,
-    ) -> Result<UploaderStats> {
+    pub async fn run(&self, mut rx: mpsc::Receiver<UploadMessage<H::Id>>) -> Result<UploaderStats> {
         tracing::info!(
             "[{}] Uploader started (max_concurrent={})",
             self.handler.name(),
@@ -219,13 +216,23 @@ impl<H: UploadHandler> ConcurrentUploader<H> {
                 stats.uploads_attempted += 1;
                 stats.uploads_succeeded += 1;
                 stats.bytes_uploaded += bytes;
-                tracing::debug!("[{}] Uploaded {:?} ({} bytes)", self.handler.name(), id, bytes);
+                tracing::debug!(
+                    "[{}] Uploaded {:?} ({} bytes)",
+                    self.handler.name(),
+                    id,
+                    bytes
+                );
             }
             Ok((id, Err(e))) => {
                 let mut stats = self.stats.lock().await;
                 stats.uploads_attempted += 1;
                 stats.uploads_failed += 1;
-                tracing::error!("[{}] Upload failed for {:?}: {}", self.handler.name(), id, e);
+                tracing::error!(
+                    "[{}] Upload failed for {:?}: {}",
+                    self.handler.name(),
+                    id,
+                    e
+                );
             }
             Err(e) => {
                 let mut stats = self.stats.lock().await;
@@ -430,9 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_respects_limit() {
-        let handler = Arc::new(
-            MockHandler::new("test").with_delay(Duration::from_millis(50)),
-        );
+        let handler = Arc::new(MockHandler::new("test").with_delay(Duration::from_millis(50)));
         let uploader = Arc::new(ConcurrentUploader::new(handler.clone(), 3));
 
         let (tx, rx) = mpsc::channel(20);
@@ -494,9 +499,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_drains() {
-        let handler = Arc::new(
-            MockHandler::new("test").with_delay(Duration::from_millis(100)),
-        );
+        let handler = Arc::new(MockHandler::new("test").with_delay(Duration::from_millis(100)));
         let uploader = Arc::new(ConcurrentUploader::new(handler.clone(), 4));
 
         let (tx, rx) = mpsc::channel(10);
@@ -524,9 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_close_drains() {
-        let handler = Arc::new(
-            MockHandler::new("test").with_delay(Duration::from_millis(50)),
-        );
+        let handler = Arc::new(MockHandler::new("test").with_delay(Duration::from_millis(50)));
         let uploader = Arc::new(ConcurrentUploader::new(handler.clone(), 4));
 
         let (tx, rx) = mpsc::channel(10);
@@ -592,9 +593,7 @@ mod tests {
     #[tokio::test]
     async fn test_max_concurrent_one() {
         // Edge case: max_concurrent=1 should still work (sequential)
-        let handler = Arc::new(
-            MockHandler::new("test").with_delay(Duration::from_millis(20)),
-        );
+        let handler = Arc::new(MockHandler::new("test").with_delay(Duration::from_millis(20)));
         let uploader = Arc::new(ConcurrentUploader::new(handler.clone(), 1));
 
         let (tx, rx) = mpsc::channel(10);
@@ -642,7 +641,9 @@ mod tests {
         let task = tokio::spawn(async move { uploader_clone.run(rx).await });
 
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        tx.send(UploadMessage::UploadWithAck(1, ack_tx)).await.unwrap();
+        tx.send(UploadMessage::UploadWithAck(1, ack_tx))
+            .await
+            .unwrap();
 
         let result = ack_rx.await.unwrap();
         assert!(result.is_ok());
@@ -666,7 +667,9 @@ mod tests {
         let task = tokio::spawn(async move { uploader_clone.run(rx).await });
 
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        tx.send(UploadMessage::UploadWithAck(1, ack_tx)).await.unwrap();
+        tx.send(UploadMessage::UploadWithAck(1, ack_tx))
+            .await
+            .unwrap();
 
         let result = ack_rx.await.unwrap();
         assert!(result.is_err());
@@ -690,7 +693,9 @@ mod tests {
         tx.send(UploadMessage::Upload(2)).await.unwrap();
 
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        tx.send(UploadMessage::UploadWithAck(3, ack_tx)).await.unwrap();
+        tx.send(UploadMessage::UploadWithAck(3, ack_tx))
+            .await
+            .unwrap();
 
         tx.send(UploadMessage::Upload(4)).await.unwrap();
 

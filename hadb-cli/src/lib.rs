@@ -13,6 +13,6 @@ pub mod signals;
 
 pub use args::*;
 pub use config::{load_config, SharedConfig};
-pub use errors::{ExitStatus, classify_error};
-pub use runner::{CliBackend, run_cli};
+pub use errors::{classify_error, ExitStatus};
+pub use runner::{run_cli, CliBackend};
 pub use signals::shutdown_signal;

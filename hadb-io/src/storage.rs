@@ -34,12 +34,8 @@ pub trait ObjectStore: Send + Sync {
     async fn upload_file(&self, key: &str, path: &Path) -> Result<()>;
 
     /// Upload a file with checksum.
-    async fn upload_file_with_checksum(
-        &self,
-        key: &str,
-        path: &Path,
-        checksum: &str,
-    ) -> Result<()>;
+    async fn upload_file_with_checksum(&self, key: &str, path: &Path, checksum: &str)
+        -> Result<()>;
 
     /// Download bytes from storage.
     async fn download_bytes(&self, key: &str) -> Result<Vec<u8>>;
@@ -148,11 +144,7 @@ mod s3_impl {
             crate::s3::list_objects(&self.client, &self.bucket, prefix).await
         }
 
-        async fn list_objects_after(
-            &self,
-            prefix: &str,
-            start_after: &str,
-        ) -> Result<Vec<String>> {
+        async fn list_objects_after(&self, prefix: &str, start_after: &str) -> Result<Vec<String>> {
             crate::s3::list_objects_after(&self.client, &self.bucket, prefix, start_after).await
         }
 

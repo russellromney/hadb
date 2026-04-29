@@ -153,13 +153,14 @@ pub fn run_cli<B: CliBackend + 'static>(backend: B) -> ExitCode {
     let cli = Cli::parse();
 
     let config_path = cli.config.as_deref();
-    let (shared, product) = match config::load_config::<B::Config>(config_path, backend.config_filename()) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("{}: config error: {e:#}", backend.product_name());
-            return ExitStatus::Config.into();
-        }
-    };
+    let (shared, product) =
+        match config::load_config::<B::Config>(config_path, backend.config_filename()) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("{}: config error: {e:#}", backend.product_name());
+                return ExitStatus::Config.into();
+            }
+        };
 
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
 

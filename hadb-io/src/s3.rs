@@ -43,12 +43,7 @@ pub async fn create_client(endpoint: Option<&str>) -> Result<Client> {
 }
 
 /// Upload bytes to S3.
-pub async fn upload_bytes(
-    client: &Client,
-    bucket: &str,
-    key: &str,
-    data: Vec<u8>,
-) -> Result<()> {
+pub async fn upload_bytes(client: &Client, bucket: &str, key: &str, data: Vec<u8>) -> Result<()> {
     let len = data.len();
     client
         .put_object()
@@ -80,12 +75,7 @@ pub async fn upload_file(client: &Client, bucket: &str, key: &str, path: &Path) 
 
 /// Download bytes from S3.
 pub async fn download_bytes(client: &Client, bucket: &str, key: &str) -> Result<Vec<u8>> {
-    let resp = client
-        .get_object()
-        .bucket(bucket)
-        .key(key)
-        .send()
-        .await?;
+    let resp = client.get_object().bucket(bucket).key(key).send().await?;
 
     let data = resp.body.collect().await?.into_bytes().to_vec();
     tracing::debug!(
@@ -265,10 +255,7 @@ pub async fn exists(client: &Client, bucket: &str, key: &str) -> Result<bool> {
                 if msg.contains("NotFound") || msg.contains("404") || msg.contains("NoSuchKey") {
                     Ok(false)
                 } else {
-                    Err(anyhow!(
-                        "Failed to check object existence: {:?}",
-                        err.err()
-                    ))
+                    Err(anyhow!("Failed to check object existence: {:?}", err.err()))
                 }
             }
         },

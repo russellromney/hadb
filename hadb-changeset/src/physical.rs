@@ -48,7 +48,6 @@ impl PageId {
             PageId::U64(v) => v,
         }
     }
-
 }
 
 impl PartialOrd for PageId {
@@ -398,7 +397,11 @@ mod tests {
 
     #[test]
     fn test_encode_decode_roundtrip_u32() {
-        let pages = vec![page_u32(1, 0xAA, 256), page_u32(2, 0xBB, 512), page_u32(5, 0xCC, 128)];
+        let pages = vec![
+            page_u32(1, 0xAA, 256),
+            page_u32(2, 0xBB, 512),
+            page_u32(5, 0xCC, 128),
+        ];
         let cs = PhysicalChangeset::new(1, 0, PageIdSize::U32, 4096, pages);
         let encoded = encode(&cs);
         let decoded = decode(&encoded).unwrap();
@@ -408,7 +411,11 @@ mod tests {
 
     #[test]
     fn test_encode_decode_roundtrip_u64() {
-        let pages = vec![page_u64(0, 0xAA, 256), page_u64(1, 0xBB, 512), page_u64(5, 0xCC, 128)];
+        let pages = vec![
+            page_u64(0, 0xAA, 256),
+            page_u64(1, 0xBB, 512),
+            page_u64(5, 0xCC, 128),
+        ];
         let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, pages);
         let encoded = encode(&cs);
         let decoded = decode(&encoded).unwrap();
@@ -418,7 +425,13 @@ mod tests {
 
     #[test]
     fn test_single_page() {
-        let cs = PhysicalChangeset::new(42, 12345, PageIdSize::U32, 4096, vec![page_u32(7, 0xFF, 100)]);
+        let cs = PhysicalChangeset::new(
+            42,
+            12345,
+            PageIdSize::U32,
+            4096,
+            vec![page_u32(7, 0xFF, 100)],
+        );
         let decoded = decode(&encode(&cs)).unwrap();
         assert_eq!(decoded.header.seq, 42);
         assert_eq!(decoded.header.prev_checksum, 12345);
@@ -434,18 +447,37 @@ mod tests {
 
     #[test]
     fn test_sequential_chain() {
-        let cs1 = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
+        let cs1 =
+            PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
         verify_chain(0, &cs1).unwrap();
 
-        let cs2 = PhysicalChangeset::new(2, cs1.checksum, PageIdSize::U64, 262144, vec![page_u64(1, 0xBB, 64)]);
+        let cs2 = PhysicalChangeset::new(
+            2,
+            cs1.checksum,
+            PageIdSize::U64,
+            262144,
+            vec![page_u64(1, 0xBB, 64)],
+        );
         verify_chain(cs1.checksum, &cs2).unwrap();
     }
 
     #[test]
     fn test_three_changeset_chain() {
         let cs1 = PhysicalChangeset::new(1, 0, PageIdSize::U32, 4096, vec![page_u32(1, 0x11, 32)]);
-        let cs2 = PhysicalChangeset::new(2, cs1.checksum, PageIdSize::U32, 4096, vec![page_u32(2, 0x22, 32), page_u32(3, 0x33, 32)]);
-        let cs3 = PhysicalChangeset::new(3, cs2.checksum, PageIdSize::U32, 4096, vec![page_u32(1, 0x44, 32)]);
+        let cs2 = PhysicalChangeset::new(
+            2,
+            cs1.checksum,
+            PageIdSize::U32,
+            4096,
+            vec![page_u32(2, 0x22, 32), page_u32(3, 0x33, 32)],
+        );
+        let cs3 = PhysicalChangeset::new(
+            3,
+            cs2.checksum,
+            PageIdSize::U32,
+            4096,
+            vec![page_u32(1, 0x44, 32)],
+        );
 
         verify_chain(0, &cs1).unwrap();
         verify_chain(cs1.checksum, &cs2).unwrap();
@@ -454,11 +486,19 @@ mod tests {
 
     #[test]
     fn test_page_id_size_preserved() {
-        let cs_u32 = PhysicalChangeset::new(1, 0, PageIdSize::U32, 4096, vec![page_u32(1, 0xAA, 32)]);
-        let cs_u64 = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(1, 0xAA, 32)]);
+        let cs_u32 =
+            PhysicalChangeset::new(1, 0, PageIdSize::U32, 4096, vec![page_u32(1, 0xAA, 32)]);
+        let cs_u64 =
+            PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(1, 0xAA, 32)]);
 
-        assert_eq!(decode(&encode(&cs_u32)).unwrap().header.page_id_size, PageIdSize::U32);
-        assert_eq!(decode(&encode(&cs_u64)).unwrap().header.page_id_size, PageIdSize::U64);
+        assert_eq!(
+            decode(&encode(&cs_u32)).unwrap().header.page_id_size,
+            PageIdSize::U32
+        );
+        assert_eq!(
+            decode(&encode(&cs_u64)).unwrap().header.page_id_size,
+            PageIdSize::U64
+        );
     }
 
     // --- Negative ---
@@ -468,7 +508,10 @@ mod tests {
         let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
         let mut encoded = encode(&cs);
         encoded[0] = b'X';
-        assert!(matches!(decode(&encoded).unwrap_err(), ChangesetError::InvalidMagic));
+        assert!(matches!(
+            decode(&encoded).unwrap_err(),
+            ChangesetError::InvalidMagic
+        ));
     }
 
     #[test]
@@ -476,7 +519,10 @@ mod tests {
         let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
         let mut encoded = encode(&cs);
         encoded[5] = 99;
-        assert!(matches!(decode(&encoded).unwrap_err(), ChangesetError::UnsupportedVersion(99)));
+        assert!(matches!(
+            decode(&encoded).unwrap_err(),
+            ChangesetError::UnsupportedVersion(99)
+        ));
     }
 
     #[test]
@@ -485,25 +531,37 @@ mod tests {
         let mut encoded = encode(&cs);
         let data_offset = HEADER_SIZE + 8 + 4; // past header + page_id(8) + data_len(4)
         encoded[data_offset] ^= 0xFF;
-        assert!(matches!(decode(&encoded).unwrap_err(), ChangesetError::ChecksumMismatch { .. }));
+        assert!(matches!(
+            decode(&encoded).unwrap_err(),
+            ChangesetError::ChecksumMismatch { .. }
+        ));
     }
 
     #[test]
     fn test_truncated_header() {
-        assert!(matches!(decode(&[0u8; 10]).unwrap_err(), ChangesetError::Truncated { .. }));
+        assert!(matches!(
+            decode(&[0u8; 10]).unwrap_err(),
+            ChangesetError::Truncated { .. }
+        ));
     }
 
     #[test]
     fn test_truncated_page_data() {
         let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
         let encoded = encode(&cs);
-        assert!(matches!(decode(&encoded[..HEADER_SIZE + 5]).unwrap_err(), ChangesetError::Truncated { .. }));
+        assert!(matches!(
+            decode(&encoded[..HEADER_SIZE + 5]).unwrap_err(),
+            ChangesetError::Truncated { .. }
+        ));
     }
 
     #[test]
     fn test_chain_broken() {
         let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
-        assert!(matches!(verify_chain(999, &cs).unwrap_err(), ChangesetError::ChainBroken { .. }));
+        assert!(matches!(
+            verify_chain(999, &cs).unwrap_err(),
+            ChangesetError::ChainBroken { .. }
+        ));
     }
 
     #[test]
@@ -511,7 +569,10 @@ mod tests {
         let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
         let mut encoded = encode(&cs);
         encoded[7] = 3; // invalid: not 4 or 8
-        assert!(matches!(decode(&encoded).unwrap_err(), ChangesetError::InvalidPageIdSize(3)));
+        assert!(matches!(
+            decode(&encoded).unwrap_err(),
+            ChangesetError::InvalidPageIdSize(3)
+        ));
     }
 
     #[test]
@@ -522,7 +583,10 @@ mod tests {
         let data_len_offset = HEADER_SIZE + 8; // past header + page_id(8)
         let huge: u32 = 262144 + 1;
         encoded[data_len_offset..data_len_offset + 4].copy_from_slice(&huge.to_be_bytes());
-        assert!(matches!(decode(&encoded).unwrap_err(), ChangesetError::PageTooLarge { .. }));
+        assert!(matches!(
+            decode(&encoded).unwrap_err(),
+            ChangesetError::PageTooLarge { .. }
+        ));
     }
 
     #[test]
@@ -530,7 +594,10 @@ mod tests {
         let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 64)]);
         let mut encoded = encode(&cs);
         encoded.push(0xFF);
-        assert!(matches!(decode(&encoded).unwrap_err(), ChangesetError::Truncated { .. }));
+        assert!(matches!(
+            decode(&encoded).unwrap_err(),
+            ChangesetError::Truncated { .. }
+        ));
     }
 
     // --- Edge cases ---
@@ -545,7 +612,9 @@ mod tests {
 
     #[test]
     fn test_large_changeset() {
-        let pages: Vec<PageEntry> = (0..1000).map(|i| page_u64(i, (i % 256) as u8, 64)).collect();
+        let pages: Vec<PageEntry> = (0..1000)
+            .map(|i| page_u64(i, (i % 256) as u8, 64))
+            .collect();
         let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, pages);
         let decoded = decode(&encode(&cs)).unwrap();
         assert_eq!(decoded.pages.len(), 1000);
@@ -568,7 +637,13 @@ mod tests {
 
     #[test]
     fn test_full_size_page_u64() {
-        let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xBB, 262144)]);
+        let cs = PhysicalChangeset::new(
+            1,
+            0,
+            PageIdSize::U64,
+            262144,
+            vec![page_u64(0, 0xBB, 262144)],
+        );
         let decoded = decode(&encode(&cs)).unwrap();
         assert_eq!(decoded.pages[0].data.len(), 262144);
     }
@@ -595,7 +670,16 @@ mod tests {
 
     #[test]
     fn test_zero_length_page_data() {
-        let cs = PhysicalChangeset::new(1, 0, PageIdSize::U32, 4096, vec![PageEntry { page_id: PageId::U32(1), data: vec![] }]);
+        let cs = PhysicalChangeset::new(
+            1,
+            0,
+            PageIdSize::U32,
+            4096,
+            vec![PageEntry {
+                page_id: PageId::U32(1),
+                data: vec![],
+            }],
+        );
         let decoded = decode(&encode(&cs)).unwrap();
         assert_eq!(decoded.pages[0].data.len(), 0);
         verify_chain(0, &decoded).unwrap();
@@ -603,7 +687,11 @@ mod tests {
 
     #[test]
     fn test_unsorted_pages_sorted_on_new() {
-        let pages = vec![page_u64(5, 0xCC, 32), page_u64(0, 0xAA, 32), page_u64(3, 0xBB, 32)];
+        let pages = vec![
+            page_u64(5, 0xCC, 32),
+            page_u64(0, 0xAA, 32),
+            page_u64(3, 0xBB, 32),
+        ];
         let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, pages);
         assert_eq!(cs.pages[0].page_id, PageId::U64(0));
         assert_eq!(cs.pages[1].page_id, PageId::U64(3));
@@ -628,14 +716,26 @@ mod tests {
 
     #[test]
     fn test_u32_max_page_id() {
-        let cs = PhysicalChangeset::new(1, 0, PageIdSize::U32, 4096, vec![page_u32(u32::MAX, 0xAA, 16)]);
+        let cs = PhysicalChangeset::new(
+            1,
+            0,
+            PageIdSize::U32,
+            4096,
+            vec![page_u32(u32::MAX, 0xAA, 16)],
+        );
         let decoded = decode(&encode(&cs)).unwrap();
         assert_eq!(decoded.pages[0].page_id, PageId::U32(u32::MAX));
     }
 
     #[test]
     fn test_u64_max_page_id() {
-        let cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(u64::MAX, 0xBB, 16)]);
+        let cs = PhysicalChangeset::new(
+            1,
+            0,
+            PageIdSize::U64,
+            262144,
+            vec![page_u64(u64::MAX, 0xBB, 16)],
+        );
         let decoded = decode(&encode(&cs)).unwrap();
         assert_eq!(decoded.pages[0].page_id, PageId::U64(u64::MAX));
     }
@@ -661,8 +761,14 @@ mod tests {
     fn test_mixed_page_id_variants_panics() {
         // Mixing U32 and U64 page IDs in a U32 changeset should panic
         let pages = vec![
-            PageEntry { page_id: PageId::U32(1), data: vec![0xAA; 32] },
-            PageEntry { page_id: PageId::U64(2), data: vec![0xBB; 32] },
+            PageEntry {
+                page_id: PageId::U32(1),
+                data: vec![0xAA; 32],
+            },
+            PageEntry {
+                page_id: PageId::U64(2),
+                data: vec![0xBB; 32],
+            },
         ];
         PhysicalChangeset::new(1, 0, PageIdSize::U32, 4096, pages);
     }
@@ -670,7 +776,8 @@ mod tests {
     #[test]
     fn test_flags_roundtrip() {
         // Create changeset with non-zero flags (reserved bits)
-        let mut cs = PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 32)]);
+        let mut cs =
+            PhysicalChangeset::new(1, 0, PageIdSize::U64, 262144, vec![page_u64(0, 0xAA, 32)]);
         cs.header.flags = 0x03; // simulate compression + encryption flags
 
         let encoded = encode(&cs);
