@@ -255,7 +255,10 @@ impl MockStorageBackend {
 #[async_trait]
 impl StorageBackend for MockStorageBackend {
     async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
-        self.data.lock().unwrap().insert(key.to_string(), data.to_vec());
+        self.data
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), data.to_vec());
         Ok(())
     }
 
@@ -421,7 +424,10 @@ async fn test_silent_failure_doesnt_return_garbage() {
 
     let result = storage.download("key1").await;
 
-    assert!(result.is_err(), "silent failure should return error, not garbage data");
+    assert!(
+        result.is_err(),
+        "silent failure should return error, not garbage data"
+    );
 }
 
 #[tokio::test]
@@ -431,7 +437,10 @@ async fn test_corruption_would_be_detected_by_checksum() {
 
     let inner2 = MockStorageBackend::new();
     let storage2 = FaultyStorageBackend::new(inner2.clone(), FaultMode::None);
-    storage2.upload("key1", b"real_data_with_checksum").await.unwrap();
+    storage2
+        .upload("key1", b"real_data_with_checksum")
+        .await
+        .unwrap();
 
     let storage3 = FaultyStorageBackend::new(inner2, FaultMode::DownloadCorruptsData);
     let data = storage3.download("key1").await.unwrap();

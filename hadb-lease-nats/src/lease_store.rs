@@ -54,9 +54,7 @@ impl LeaseStore for NatsLeaseStore {
 
         match entry {
             Some(e) => match e.operation {
-                kv::Operation::Put => {
-                    Ok(Some((e.value.to_vec(), e.revision.to_string())))
-                }
+                kv::Operation::Put => Ok(Some((e.value.to_vec(), e.revision.to_string()))),
                 // Deleted or purged entries are treated as absent.
                 kv::Operation::Delete | kv::Operation::Purge => Ok(None),
             },
@@ -134,8 +132,7 @@ mod tests {
                 Ok(u) => u,
                 Err(_) => return None,
             };
-            let bucket_name =
-                format!("test-{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+            let bucket_name = format!("test-{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
             let client = async_nats::connect(&url).await.expect("connect");
             let jetstream = async_nats::jetstream::new(client);
             let kv_store = jetstream
@@ -155,10 +152,7 @@ mod tests {
 
         /// Delete the test bucket. Call at the end of each test.
         async fn cleanup(self) {
-            let _ = self
-                .jetstream
-                .delete_key_value(&self.bucket_name)
-                .await;
+            let _ = self.jetstream.delete_key_value(&self.bucket_name).await;
         }
     }
 
@@ -171,7 +165,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_nonexistent() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
         let result = f.read("no-such-key").await.unwrap();
         assert!(result.is_none());
         f.cleanup().await;
@@ -179,7 +175,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_and_read() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
 
         let cas = f
             .write_if_not_exists("lease1", b"node-a".to_vec())
@@ -198,7 +196,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_conflict() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
 
         let first = f
             .write_if_not_exists("lease1", b"node-a".to_vec())
@@ -217,7 +217,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_with_correct_revision() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
 
         let create = f
             .write_if_not_exists("lease1", b"v1".to_vec())
@@ -240,7 +242,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_cas_conflict() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
 
         f.write_if_not_exists("lease1", b"v1".to_vec())
             .await
@@ -258,7 +262,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_stale_revision() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
 
         let create = f
             .write_if_not_exists("lease1", b"v1".to_vec())
@@ -284,7 +290,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_and_read() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
 
         f.write_if_not_exists("lease1", b"node-a".to_vec())
             .await
@@ -299,7 +307,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_idempotent() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
         // Deleting a key that was never created should not error.
         f.delete("never-existed").await.unwrap();
         f.cleanup().await;
@@ -307,7 +317,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_then_create() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
 
         f.write_if_not_exists("lease1", b"v1".to_vec())
             .await
@@ -328,7 +340,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_create_is_atomic() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
 
         // Spawn 10 concurrent tasks all trying to create the same key
         let mut handles = vec![];
@@ -365,7 +379,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_etag_is_numeric_revision() {
-        let Some(f) = TestFixture::new().await else { return };
+        let Some(f) = TestFixture::new().await else {
+            return;
+        };
 
         let create = f
             .write_if_not_exists("lease1", b"data".to_vec())

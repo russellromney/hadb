@@ -101,7 +101,9 @@ impl AtomicFence {
     pub fn new() -> (AtomicFence, AtomicFenceWriter) {
         let state = Arc::new(ArcSwapOption::from(None));
         (
-            AtomicFence { state: state.clone() },
+            AtomicFence {
+                state: state.clone(),
+            },
             AtomicFenceWriter { state },
         )
     }

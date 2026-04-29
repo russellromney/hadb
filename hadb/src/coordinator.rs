@@ -16,13 +16,15 @@ use anyhow::Result;
 use tokio::sync::{broadcast, watch, RwLock};
 use tokio::task::JoinHandle;
 
-use crate::follower::{run_leader_renewal, run_lease_monitor, FollowerBehavior, LeaseMonitorContext};
+use crate::follower::{
+    run_leader_renewal, run_lease_monitor, FollowerBehavior, LeaseMonitorContext,
+};
 use crate::lease::DbLease;
 use crate::metrics::HaMetrics;
 use crate::node_registry::{NodeRegistration, NodeRegistry};
-use turbodb::ManifestStore;
 use crate::traits::Replicator;
 use crate::types::{CoordinatorConfig, Role, RoleEvent};
+use turbodb::ManifestStore;
 
 /// Atomic wrapper around Role for lock-free reads.
 pub(crate) struct AtomicRole(AtomicU8);
@@ -153,7 +155,11 @@ impl Coordinator {
                     role: Role::Leader,
                 });
                 tracing::info!("Coordinator: '{}' joined as Leader (no HA)", name);
-                return Ok(JoinResult { role: Role::Leader, caught_up, position });
+                return Ok(JoinResult {
+                    role: Role::Leader,
+                    caught_up,
+                    position,
+                });
             }
         };
 
@@ -270,7 +276,11 @@ impl Coordinator {
                     role: Role::Leader,
                 });
                 tracing::info!("Coordinator: '{}' joined as Leader", name);
-                Ok(JoinResult { role: Role::Leader, caught_up: leader_caught_up, position: leader_position })
+                Ok(JoinResult {
+                    role: Role::Leader,
+                    caught_up: leader_caught_up,
+                    position: leader_position,
+                })
             }
             Role::Follower => {
                 // Restore from storage to get a base snapshot.
@@ -356,7 +366,11 @@ impl Coordinator {
                     role: Role::Follower,
                 });
                 tracing::info!("Coordinator: '{}' joined as Follower", name);
-                Ok(JoinResult { role: Role::Follower, caught_up: follower_caught_up, position: follower_position })
+                Ok(JoinResult {
+                    role: Role::Follower,
+                    caught_up: follower_caught_up,
+                    position: follower_position,
+                })
             }
         }
     }
@@ -469,7 +483,10 @@ impl Coordinator {
         drop(dbs);
         for (name, entry) in entries {
             entry.task_handle.abort();
-            tracing::warn!("Coordinator: ABORTED tasks for '{}' (test-only crash simulation)", name);
+            tracing::warn!(
+                "Coordinator: ABORTED tasks for '{}' (test-only crash simulation)",
+                name
+            );
         }
     }
 
@@ -510,9 +527,7 @@ impl Coordinator {
                         lease_config.ttl_secs,
                     );
                     match lease.read().await {
-                        Ok(Some((data, _)))
-                            if data.instance_id == lease_config.instance_id =>
-                        {
+                        Ok(Some((data, _))) if data.instance_id == lease_config.instance_id => {
                             if let Err(e) = lease_config.store.delete(lease.lease_key()).await {
                                 tracing::error!(
                                     "Coordinator: failed to release lease for '{}': {}",
@@ -565,11 +580,7 @@ impl Coordinator {
 
     /// Get the current role of a database.
     pub async fn role(&self, name: &str) -> Option<Role> {
-        self.databases
-            .read()
-            .await
-            .get(name)
-            .map(|e| e.role.load())
+        self.databases.read().await.get(name).map(|e| e.role.load())
     }
 
     /// Get the current leader's address for a database.
@@ -697,24 +708,20 @@ impl Coordinator {
         let _ = entry.cancel_tx.send(true);
 
         // Flush pending data before releasing leadership.
-        if let Err(e) = tokio::time::timeout(
-            self.config.replicator_timeout,
-            self.replicator.sync(name),
-        )
-        .await
+        if let Err(e) =
+            tokio::time::timeout(self.config.replicator_timeout, self.replicator.sync(name)).await
         {
             tracing::error!(
                 "Coordinator: handoff replicator.sync('{}') timed out after {:?}: {}",
-                name, self.config.replicator_timeout, e
+                name,
+                self.config.replicator_timeout,
+                e
             );
         }
 
-        if tokio::time::timeout(
-            self.config.replicator_timeout,
-            self.replicator.remove(name),
-        )
-        .await
-        .is_err()
+        if tokio::time::timeout(self.config.replicator_timeout, self.replicator.remove(name))
+            .await
+            .is_err()
         {
             tracing::error!(
                 "Coordinator: handoff replicator.remove('{}') timed out after {:?}",
@@ -733,9 +740,7 @@ impl Coordinator {
                 lease_config.ttl_secs,
             );
             match lease.read().await {
-                Ok(Some((data, _)))
-                    if data.instance_id == lease_config.instance_id =>
-                {
+                Ok(Some((data, _))) if data.instance_id == lease_config.instance_id => {
                     if let Err(e) = lease_config.store.delete(lease.lease_key()).await {
                         tracing::error!(
                             "Coordinator: failed to release lease during handoff for '{}': {}",

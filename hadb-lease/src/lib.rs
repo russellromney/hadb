@@ -214,8 +214,7 @@ mod tests {
     /// an upgrade.
     #[test]
     fn lease_data_deserializes_with_missing_defaults() {
-        let minimal =
-            r#"{"instance_id":"i","claimed_at":100,"ttl_secs":5}"#;
+        let minimal = r#"{"instance_id":"i","claimed_at":100,"ttl_secs":5}"#;
         let lease: LeaseData =
             serde_json::from_str(minimal).expect("missing-defaults should deserialize");
         assert_eq!(lease.instance_id, "i");
@@ -300,24 +299,48 @@ mod tests {
 
     #[test]
     fn cas_result_equality() {
-        let r1 = CasResult { success: true, etag: Some("v1".into()) };
-        let r2 = CasResult { success: true, etag: Some("v1".into()) };
-        let r3 = CasResult { success: false, etag: None };
+        let r1 = CasResult {
+            success: true,
+            etag: Some("v1".into()),
+        };
+        let r2 = CasResult {
+            success: true,
+            etag: Some("v1".into()),
+        };
+        let r3 = CasResult {
+            success: false,
+            etag: None,
+        };
         assert_eq!(r1, r2);
         assert_ne!(r1, r3);
     }
 
     #[test]
     fn cas_result_edge_cases() {
-        let r1 = CasResult { success: false, etag: None };
-        let r2 = CasResult { success: false, etag: None };
+        let r1 = CasResult {
+            success: false,
+            etag: None,
+        };
+        let r2 = CasResult {
+            success: false,
+            etag: None,
+        };
         assert_eq!(r1, r2);
 
-        let r3 = CasResult { success: true, etag: Some(String::new()) };
-        let r4 = CasResult { success: true, etag: Some(String::new()) };
+        let r3 = CasResult {
+            success: true,
+            etag: Some(String::new()),
+        };
+        let r4 = CasResult {
+            success: true,
+            etag: Some(String::new()),
+        };
         assert_eq!(r3, r4);
 
-        let r5 = CasResult { success: true, etag: None };
+        let r5 = CasResult {
+            success: true,
+            etag: None,
+        };
         assert!(r5.success);
         assert!(r5.etag.is_none());
     }

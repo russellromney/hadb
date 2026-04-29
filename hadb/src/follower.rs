@@ -18,11 +18,11 @@ use tokio::sync::{broadcast, watch, RwLock};
 
 use crate::coordinator::AtomicRole;
 use crate::lease::DbLease;
-use turbodb::ManifestStore;
 use crate::metrics::HaMetrics;
 use crate::node_registry::NodeRegistry;
 use crate::traits::Replicator;
 use crate::types::{LeaseConfig, Role, RoleEvent};
+use turbodb::ManifestStore;
 
 /// Follower behavior abstraction for database-specific replication.
 ///

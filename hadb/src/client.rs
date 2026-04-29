@@ -88,9 +88,7 @@ impl HaClientBuilder {
             .lease_store
             .ok_or_else(|| anyhow!("lease_store is required"))?;
 
-        let http_client = reqwest::Client::builder()
-            .timeout(self.timeout)
-            .build()?;
+        let http_client = reqwest::Client::builder().timeout(self.timeout).build()?;
 
         let leader_addr = discover_leader(&lease_store, &self.prefix, &self.db_name).await?;
 
@@ -212,11 +210,7 @@ impl HaClient {
         }
     }
 
-    async fn do_post<T: Serialize>(
-        &self,
-        url: &str,
-        body: &T,
-    ) -> Result<serde_json::Value> {
+    async fn do_post<T: Serialize>(&self, url: &str, body: &T) -> Result<serde_json::Value> {
         let mut req = self.http_client.post(url).json(body);
         if let Some(ref secret) = self.secret {
             req = req.bearer_auth(secret);

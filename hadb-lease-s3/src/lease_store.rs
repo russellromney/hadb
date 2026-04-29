@@ -29,7 +29,11 @@ pub struct S3LeaseStore {
 
 impl S3LeaseStore {
     pub fn new(client: aws_sdk_s3::Client, bucket: String) -> Self {
-        Self { client, bucket, prefix: String::new() }
+        Self {
+            client,
+            bucket,
+            prefix: String::new(),
+        }
     }
 
     /// Set a key prefix used by `key_for`. Scope-named lease objects land
@@ -200,6 +204,9 @@ mod tests {
     #[test]
     fn key_for_with_prefix() {
         let s = S3LeaseStore::new(dummy_client(), "bkt".into()).with_prefix("placement/");
-        assert_eq!(s.key_for("placement-db"), "placement/placement-db/_lease.json");
+        assert_eq!(
+            s.key_for("placement-db"),
+            "placement/placement-db/_lease.json"
+        );
     }
 }

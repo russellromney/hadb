@@ -375,7 +375,10 @@ mod tests {
         assert_eq!(nodes[0].last_seen, now + 30);
 
         // Deregister
-        registry.deregister("prefix/", "mydb", "inst-1").await.unwrap();
+        registry
+            .deregister("prefix/", "mydb", "inst-1")
+            .await
+            .unwrap();
 
         // Discover after deregister
         let nodes = registry.discover_all("prefix/", "mydb").await.unwrap();

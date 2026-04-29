@@ -133,14 +133,8 @@ mod tests {
     #[tokio::test]
     async fn write_if_not_exists_rejects_existing() {
         let store = InMemoryLeaseStore::new();
-        store
-            .write_if_not_exists("k", b"a".to_vec())
-            .await
-            .unwrap();
-        let r = store
-            .write_if_not_exists("k", b"b".to_vec())
-            .await
-            .unwrap();
+        store.write_if_not_exists("k", b"a".to_vec()).await.unwrap();
+        let r = store.write_if_not_exists("k", b"b".to_vec()).await.unwrap();
         assert!(!r.success);
         assert!(r.etag.is_none());
         assert_eq!(store.read("k").await.unwrap().unwrap().0, b"a");
@@ -184,10 +178,7 @@ mod tests {
     #[tokio::test]
     async fn delete_is_idempotent() {
         let store = InMemoryLeaseStore::new();
-        store
-            .write_if_not_exists("k", b"v".to_vec())
-            .await
-            .unwrap();
+        store.write_if_not_exists("k", b"v".to_vec()).await.unwrap();
         store.delete("k").await.unwrap();
         assert!(store.read("k").await.unwrap().is_none());
         // Second delete must not error.

@@ -61,6 +61,46 @@ pub trait Replicator: Send + Sync {
 }
 
 // ============================================================================
+// NoOpReplicator: explicit "no replication" implementation
+// ============================================================================
+
+/// `Replicator` impl that does nothing. Useful when the consumer's durability
+/// strategy doesn't involve log shipping at all — for example, turbolite's
+/// `Cloud` mode where every commit syncs page groups directly to S3 and there
+/// is no WAL/journal to replicate.
+///
+/// All methods return `Ok(())` immediately.
+pub struct NoOpReplicator;
+
+impl NoOpReplicator {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NoOpReplicator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Replicator for NoOpReplicator {
+    async fn add(&self, _name: &str, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+    async fn pull(&self, _name: &str, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+    async fn remove(&self, _name: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn sync(&self, _name: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Executor: Query execution abstraction
 // ============================================================================
 
@@ -279,14 +319,23 @@ mod tests {
         let replicator = FailableReplicator::new();
 
         // Should succeed initially
-        assert!(replicator.add("testdb", Path::new("/tmp/test.db")).await.is_ok());
+        assert!(replicator
+            .add("testdb", Path::new("/tmp/test.db"))
+            .await
+            .is_ok());
 
         // Set to fail mode
         replicator.set_fail(true).await;
 
         // Should fail now
-        assert!(replicator.add("testdb", Path::new("/tmp/test.db")).await.is_err());
-        assert!(replicator.pull("testdb", Path::new("/tmp/test.db")).await.is_err());
+        assert!(replicator
+            .add("testdb", Path::new("/tmp/test.db"))
+            .await
+            .is_err());
+        assert!(replicator
+            .pull("testdb", Path::new("/tmp/test.db"))
+            .await
+            .is_err());
         assert!(replicator.remove("testdb").await.is_err());
         assert!(replicator.sync("testdb").await.is_err());
     }

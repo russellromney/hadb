@@ -46,11 +46,15 @@ pub enum Durability {
 }
 
 impl Default for HaMode {
-    fn default() -> Self { HaMode::Dedicated }
+    fn default() -> Self {
+        HaMode::Dedicated
+    }
 }
 
 impl Default for Durability {
-    fn default() -> Self { Durability::Replicated(Duration::from_secs(1)) }
+    fn default() -> Self {
+        Durability::Replicated(Duration::from_secs(1))
+    }
 }
 
 impl std::fmt::Display for HaMode {
@@ -387,7 +391,10 @@ mod tests {
     fn test_coordinator_config_default() {
         let config = CoordinatorConfig::default();
 
-        assert_eq!(config.durability, Durability::Replicated(Duration::from_secs(1)));
+        assert_eq!(
+            config.durability,
+            Durability::Replicated(Duration::from_secs(1))
+        );
         assert_eq!(config.snapshot_interval, Duration::from_secs(3600));
         assert!(config.lease.is_none());
         assert_eq!(config.follower_pull_interval, Duration::from_secs(1));
@@ -413,7 +420,10 @@ mod tests {
         config.follower_pull_interval = Duration::from_secs(2);
         config.replicator_timeout = Duration::from_secs(60);
 
-        assert_eq!(config.durability, Durability::Replicated(Duration::from_secs(5)));
+        assert_eq!(
+            config.durability,
+            Durability::Replicated(Duration::from_secs(5))
+        );
         assert_eq!(config.snapshot_interval, Duration::from_secs(7200));
         assert_eq!(config.follower_pull_interval, Duration::from_secs(2));
         assert_eq!(config.replicator_timeout, Duration::from_secs(60));

@@ -79,7 +79,9 @@ impl HaMetrics {
             promotions_attempted: self.promotions_attempted.load(Ordering::Relaxed),
             promotions_succeeded: self.promotions_succeeded.load(Ordering::Relaxed),
             promotions_aborted_catchup: self.promotions_aborted_catchup.load(Ordering::Relaxed),
-            promotions_aborted_replicator: self.promotions_aborted_replicator.load(Ordering::Relaxed),
+            promotions_aborted_replicator: self
+                .promotions_aborted_replicator
+                .load(Ordering::Relaxed),
             promotions_aborted_timeout: self.promotions_aborted_timeout.load(Ordering::Relaxed),
             demotions_cas_conflict: self.demotions_cas_conflict.load(Ordering::Relaxed),
             demotions_sustained_errors: self.demotions_sustained_errors.load(Ordering::Relaxed),
@@ -143,44 +145,155 @@ impl MetricsSnapshot {
         let mut out = String::with_capacity(2048);
 
         // Counters
-        Self::counter(&mut out, "hadb_lease_claims_attempted_total", "Total lease claim attempts", self.lease_claims_attempted);
-        Self::counter(&mut out, "hadb_lease_claims_succeeded_total", "Successful lease claims", self.lease_claims_succeeded);
-        Self::counter(&mut out, "hadb_lease_claims_failed_total", "Failed lease claims", self.lease_claims_failed);
-        Self::counter(&mut out, "hadb_lease_renewals_succeeded_total", "Successful lease renewals", self.lease_renewals_succeeded);
-        Self::counter(&mut out, "hadb_lease_renewals_cas_conflict_total", "Lease renewals lost to CAS conflict", self.lease_renewals_cas_conflict);
-        Self::counter(&mut out, "hadb_lease_renewals_error_total", "Lease renewal errors", self.lease_renewals_error);
+        Self::counter(
+            &mut out,
+            "hadb_lease_claims_attempted_total",
+            "Total lease claim attempts",
+            self.lease_claims_attempted,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_lease_claims_succeeded_total",
+            "Successful lease claims",
+            self.lease_claims_succeeded,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_lease_claims_failed_total",
+            "Failed lease claims",
+            self.lease_claims_failed,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_lease_renewals_succeeded_total",
+            "Successful lease renewals",
+            self.lease_renewals_succeeded,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_lease_renewals_cas_conflict_total",
+            "Lease renewals lost to CAS conflict",
+            self.lease_renewals_cas_conflict,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_lease_renewals_error_total",
+            "Lease renewal errors",
+            self.lease_renewals_error,
+        );
 
-        Self::counter(&mut out, "hadb_promotions_attempted_total", "Total promotion attempts", self.promotions_attempted);
-        Self::counter(&mut out, "hadb_promotions_succeeded_total", "Successful promotions", self.promotions_succeeded);
-        Self::counter(&mut out, "hadb_promotions_aborted_catchup_total", "Promotions aborted due to catchup failure", self.promotions_aborted_catchup);
-        Self::counter(&mut out, "hadb_promotions_aborted_replicator_total", "Promotions aborted due to replicator failure", self.promotions_aborted_replicator);
-        Self::counter(&mut out, "hadb_promotions_aborted_timeout_total", "Promotions aborted due to timeout", self.promotions_aborted_timeout);
+        Self::counter(
+            &mut out,
+            "hadb_promotions_attempted_total",
+            "Total promotion attempts",
+            self.promotions_attempted,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_promotions_succeeded_total",
+            "Successful promotions",
+            self.promotions_succeeded,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_promotions_aborted_catchup_total",
+            "Promotions aborted due to catchup failure",
+            self.promotions_aborted_catchup,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_promotions_aborted_replicator_total",
+            "Promotions aborted due to replicator failure",
+            self.promotions_aborted_replicator,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_promotions_aborted_timeout_total",
+            "Promotions aborted due to timeout",
+            self.promotions_aborted_timeout,
+        );
 
-        Self::counter(&mut out, "hadb_demotions_cas_conflict_total", "Demotions from CAS conflict", self.demotions_cas_conflict);
-        Self::counter(&mut out, "hadb_demotions_sustained_errors_total", "Demotions from sustained renewal errors", self.demotions_sustained_errors);
+        Self::counter(
+            &mut out,
+            "hadb_demotions_cas_conflict_total",
+            "Demotions from CAS conflict",
+            self.demotions_cas_conflict,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_demotions_sustained_errors_total",
+            "Demotions from sustained renewal errors",
+            self.demotions_sustained_errors,
+        );
 
-        Self::counter(&mut out, "hadb_follower_pulls_succeeded_total", "Successful follower pulls", self.follower_pulls_succeeded);
-        Self::counter(&mut out, "hadb_follower_pulls_failed_total", "Failed follower pulls", self.follower_pulls_failed);
-        Self::counter(&mut out, "hadb_follower_pulls_no_new_data_total", "Follower pulls with no new data", self.follower_pulls_no_new_data);
+        Self::counter(
+            &mut out,
+            "hadb_follower_pulls_succeeded_total",
+            "Successful follower pulls",
+            self.follower_pulls_succeeded,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_follower_pulls_failed_total",
+            "Failed follower pulls",
+            self.follower_pulls_failed,
+        );
+        Self::counter(
+            &mut out,
+            "hadb_follower_pulls_no_new_data_total",
+            "Follower pulls with no new data",
+            self.follower_pulls_no_new_data,
+        );
 
         // Readiness gauges
-        Self::gauge(&mut out, "hadb_follower_caught_up", "Whether follower is caught up (1=yes, 0=no)", self.follower_caught_up as f64);
-        Self::gauge(&mut out, "hadb_follower_replay_position", "Last replayed position", self.follower_replay_position as f64);
+        Self::gauge(
+            &mut out,
+            "hadb_follower_caught_up",
+            "Whether follower is caught up (1=yes, 0=no)",
+            self.follower_caught_up as f64,
+        );
+        Self::gauge(
+            &mut out,
+            "hadb_follower_replay_position",
+            "Last replayed position",
+            self.follower_replay_position as f64,
+        );
 
         // Gauges (last observed timing)
-        Self::gauge(&mut out, "hadb_last_promotion_duration_seconds", "Duration of last promotion", self.last_promotion_duration_us as f64 / 1_000_000.0);
-        Self::gauge(&mut out, "hadb_last_catchup_duration_seconds", "Duration of last catchup", self.last_catchup_duration_us as f64 / 1_000_000.0);
-        Self::gauge(&mut out, "hadb_last_renewal_duration_seconds", "Duration of last lease renewal", self.last_renewal_duration_us as f64 / 1_000_000.0);
+        Self::gauge(
+            &mut out,
+            "hadb_last_promotion_duration_seconds",
+            "Duration of last promotion",
+            self.last_promotion_duration_us as f64 / 1_000_000.0,
+        );
+        Self::gauge(
+            &mut out,
+            "hadb_last_catchup_duration_seconds",
+            "Duration of last catchup",
+            self.last_catchup_duration_us as f64 / 1_000_000.0,
+        );
+        Self::gauge(
+            &mut out,
+            "hadb_last_renewal_duration_seconds",
+            "Duration of last lease renewal",
+            self.last_renewal_duration_us as f64 / 1_000_000.0,
+        );
 
         out
     }
 
     fn counter(out: &mut String, name: &str, help: &str, value: u64) {
-        out.push_str(&format!("# HELP {} {}\n# TYPE {} counter\n{} {}\n", name, help, name, name, value));
+        out.push_str(&format!(
+            "# HELP {} {}\n# TYPE {} counter\n{} {}\n",
+            name, help, name, name, value
+        ));
     }
 
     fn gauge(out: &mut String, name: &str, help: &str, value: f64) {
-        out.push_str(&format!("# HELP {} {}\n# TYPE {} gauge\n{} {:.6}\n", name, help, name, name, value));
+        out.push_str(&format!(
+            "# HELP {} {}\n# TYPE {} gauge\n{} {:.6}\n",
+            name, help, name, name, value
+        ));
     }
 }
 

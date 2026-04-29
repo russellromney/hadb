@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use anyhow::{anyhow, Result};
+use std::sync::Arc;
 
 use crate::{LeaseStore, Role};
 use hadb_lease::AtomicFenceWriter;
@@ -142,7 +142,10 @@ impl DbLease {
             .clone();
 
         let body = serde_json::to_vec(&self.make_lease())?;
-        let result = self.store.write_if_match(&self.lease_key, body, &etag).await?;
+        let result = self
+            .store
+            .write_if_match(&self.lease_key, body, &etag)
+            .await?;
 
         if result.success {
             self.current_etag = result.etag;
@@ -253,7 +256,10 @@ impl DbLease {
             sleeping: true,
         };
         let body = serde_json::to_vec(&lease)?;
-        let result = self.store.write_if_match(&self.lease_key, body, &etag).await?;
+        let result = self
+            .store
+            .write_if_match(&self.lease_key, body, &etag)
+            .await?;
 
         if result.success {
             self.current_etag = result.etag;
@@ -510,11 +516,15 @@ mod tests {
             session_id: "old-session".to_string(),
             sleeping: false,
         };
-        lease2.store.write_if_match(
-            lease2.lease_key(),
-            serde_json::to_vec(&expired_lease).unwrap(),
-            lease1.current_etag.as_ref().unwrap(),
-        ).await.unwrap();
+        lease2
+            .store
+            .write_if_match(
+                lease2.lease_key(),
+                serde_json::to_vec(&expired_lease).unwrap(),
+                lease1.current_etag.as_ref().unwrap(),
+            )
+            .await
+            .unwrap();
 
         // Instance 2 takes over
         lease2.try_claim().await.unwrap();
@@ -604,11 +614,15 @@ mod tests {
             session_id: "old-session".to_string(),
             sleeping: false,
         };
-        lease2.store.write_if_match(
-            lease2.lease_key(),
-            serde_json::to_vec(&expired_lease).unwrap(),
-            lease1.current_etag.as_ref().unwrap(),
-        ).await.unwrap();
+        lease2
+            .store
+            .write_if_match(
+                lease2.lease_key(),
+                serde_json::to_vec(&expired_lease).unwrap(),
+                lease1.current_etag.as_ref().unwrap(),
+            )
+            .await
+            .unwrap();
         lease2.try_claim().await.unwrap();
 
         // Instance 1 tries to set sleeping (should fail)
@@ -783,7 +797,10 @@ mod tests {
         assert!(fence.current().is_some());
 
         lease.release().await.unwrap();
-        assert!(fence.current().is_none(), "fence should be cleared on release");
+        assert!(
+            fence.current().is_none(),
+            "fence should be cleared on release"
+        );
     }
 
     #[tokio::test]
@@ -846,11 +863,17 @@ mod tests {
         async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult> {
             let mut store = self.data.lock().unwrap();
             if store.contains_key(key) {
-                return Ok(CasResult { success: false, etag: None });
+                return Ok(CasResult {
+                    success: false,
+                    etag: None,
+                });
             }
             let etag = format!("\"{:x}\"", uuid::Uuid::new_v4().as_u128());
             store.insert(key.to_string(), (data, etag.clone()));
-            Ok(CasResult { success: true, etag: Some(etag) })
+            Ok(CasResult {
+                success: true,
+                etag: Some(etag),
+            })
         }
         async fn write_if_match(&self, key: &str, data: Vec<u8>, etag: &str) -> Result<CasResult> {
             let mut store = self.data.lock().unwrap();
@@ -858,9 +881,15 @@ mod tests {
                 Some((_, current)) if current == etag => {
                     let new_etag = format!("\"{:x}\"", uuid::Uuid::new_v4().as_u128());
                     store.insert(key.to_string(), (data, new_etag.clone()));
-                    Ok(CasResult { success: true, etag: Some(new_etag) })
+                    Ok(CasResult {
+                        success: true,
+                        etag: Some(new_etag),
+                    })
                 }
-                _ => Ok(CasResult { success: false, etag: None }),
+                _ => Ok(CasResult {
+                    success: false,
+                    etag: None,
+                }),
             }
         }
         async fn delete(&self, key: &str) -> Result<()> {
@@ -889,7 +918,11 @@ mod tests {
             .with_fence_writer(Arc::new(writer));
 
         let role = lease.try_claim().await.expect("claim");
-        assert_eq!(role, Role::Leader, "opaque-etag backend still supports CAS claim");
+        assert_eq!(
+            role,
+            Role::Leader,
+            "opaque-etag backend still supports CAS claim"
+        );
 
         // The fence must now be None. The key invariant: downstream storage
         // adapters calling `fence.require()` get `NoActiveLease` (write fails

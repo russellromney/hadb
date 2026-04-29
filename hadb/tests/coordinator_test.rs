@@ -62,10 +62,7 @@ impl Replicator for MockReplicator {
         if self.should_fail.load(Ordering::SeqCst) {
             return Err(anyhow!("mock replicator.remove failed"));
         }
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("remove({})", name));
+        self.calls.lock().unwrap().push(format!("remove({})", name));
         Ok(())
     }
 
@@ -112,9 +109,7 @@ impl FollowerBehavior for MockFollowerBehavior {
 
 // Helper to create a test coordinator. The lease store (if any) lives in
 // `config.lease.as_ref().map(|c| c.store)` after Phase Fjord.
-fn test_coordinator(
-    config: CoordinatorConfig,
-) -> (Arc<Coordinator>, MockReplicator) {
+fn test_coordinator(config: CoordinatorConfig) -> (Arc<Coordinator>, MockReplicator) {
     let replicator = MockReplicator::new();
 
     let coordinator = Coordinator::new(
@@ -642,7 +637,8 @@ async fn test_manifest_polling_emits_event_on_version_change() {
                 "session_id": "sess-1",
                 "sleeping": false,
                 "claimed_at": chrono::Utc::now().timestamp()
-            })).unwrap(),
+            }))
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -672,7 +668,13 @@ async fn test_manifest_polling_emits_event_on_version_change() {
 
     // Consume the Joined event.
     let joined = events.recv().await.unwrap();
-    assert!(matches!(joined, RoleEvent::Joined { role: Role::Follower, .. }));
+    assert!(matches!(
+        joined,
+        RoleEvent::Joined {
+            role: Role::Follower,
+            ..
+        }
+    ));
 
     // Publish initial manifest (v1) so the poll establishes a baseline.
     let manifest = Manifest {
@@ -748,7 +750,8 @@ async fn test_manifest_polling_no_event_when_version_unchanged() {
                 "session_id": "sess-1",
                 "sleeping": false,
                 "claimed_at": chrono::Utc::now().timestamp()
-            })).unwrap(),
+            }))
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -792,7 +795,10 @@ async fn test_manifest_polling_no_event_when_version_unchanged() {
 
     // Wait several poll intervals. No manifest change, so no ManifestChanged event.
     let result = tokio::time::timeout(Duration::from_millis(300), events.recv()).await;
-    assert!(result.is_err(), "should not receive any event when version is unchanged");
+    assert!(
+        result.is_err(),
+        "should not receive any event when version is unchanged"
+    );
 
     coordinator.leave("ha_db1").await.unwrap();
 }

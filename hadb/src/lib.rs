@@ -38,12 +38,16 @@ pub mod traits;
 pub mod types;
 
 // Re-export core traits
-pub use hadb_lease::{CasResult, LeaseStore};
-pub use traits::{Replicator, StorageBackend};
-pub use types::{CoordinatorConfig, Durability, HaMode, LeaseConfig, Role, RoleEvent, validate_mode_durability};
-pub use metrics::{HaMetrics, MetricsSnapshot};
-pub use lease::{DbLease, InMemoryLeaseStore, LeaseData};
-pub use node_registry::{node_key, nodes_prefix, InMemoryNodeRegistry, NodeRegistry, NodeRegistration};
-pub use follower::{FollowerBehavior, LeaseMonitorContext, run_leader_renewal, run_lease_monitor};
 pub use client::{HaClient, HaClientBuilder};
 pub use coordinator::{Coordinator, JoinResult};
+pub use follower::{run_leader_renewal, run_lease_monitor, FollowerBehavior, LeaseMonitorContext};
+pub use hadb_lease::{CasResult, LeaseStore};
+pub use lease::{DbLease, InMemoryLeaseStore, LeaseData};
+pub use metrics::{HaMetrics, MetricsSnapshot};
+pub use node_registry::{
+    node_key, nodes_prefix, InMemoryNodeRegistry, NodeRegistration, NodeRegistry,
+};
+pub use traits::{NoOpReplicator, Replicator, StorageBackend};
+pub use types::{
+    validate_mode_durability, CoordinatorConfig, Durability, HaMode, LeaseConfig, Role, RoleEvent,
+};

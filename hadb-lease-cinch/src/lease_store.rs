@@ -91,6 +91,14 @@ impl CinchLeaseStore {
             urlencoding::encode(key)
         )
     }
+
+    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.token.is_empty() {
+            req
+        } else {
+            req.bearer_auth(&self.token)
+        }
+    }
 }
 
 /// URL-encode a string for use in query parameters.
@@ -121,9 +129,7 @@ impl LeaseStore for CinchLeaseStore {
 
     async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
         let resp = self
-            .client
-            .get(&self.lease_url(key))
-            .bearer_auth(&self.token)
+            .auth(self.client.get(&self.lease_url(key)))
             .send()
             .await
             .map_err(|e| anyhow!("HTTP lease read failed: {}", e))?;
@@ -143,7 +149,10 @@ impl LeaseStore for CinchLeaseStore {
             }
             reqwest::StatusCode::NOT_FOUND => Ok(None),
             status => {
-                let text = resp.text().await.unwrap_or_else(|_| "<error reading body>".to_string());
+                let text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<error reading body>".to_string());
                 Err(anyhow!("HTTP lease read returned {}: {}", status, text))
             }
         }
@@ -156,9 +165,7 @@ impl LeaseStore for CinchLeaseStore {
         });
 
         let resp = self
-            .client
-            .post(&self.lease_url(key))
-            .bearer_auth(&self.token)
+            .auth(self.client.post(&self.lease_url(key)))
             .json(&body)
             .send()
             .await
@@ -180,7 +187,10 @@ impl LeaseStore for CinchLeaseStore {
                 etag: None,
             }),
             status => {
-                let text = resp.text().await.unwrap_or_else(|_| "<error reading body>".to_string());
+                let text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<error reading body>".to_string());
                 Err(anyhow!("HTTP lease acquire returned {}: {}", status, text))
             }
         }
@@ -193,9 +203,7 @@ impl LeaseStore for CinchLeaseStore {
         });
 
         let resp = self
-            .client
-            .put(&self.lease_url(key))
-            .bearer_auth(&self.token)
+            .auth(self.client.put(&self.lease_url(key)))
             .header("If-Match", etag)
             .json(&body)
             .send()
@@ -220,17 +228,22 @@ impl LeaseStore for CinchLeaseStore {
                 })
             }
             status => {
-                let text = resp.text().await.unwrap_or_else(|_| "<error reading body>".to_string());
-                Err(anyhow!("HTTP lease heartbeat returned {}: {}", status, text))
+                let text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<error reading body>".to_string());
+                Err(anyhow!(
+                    "HTTP lease heartbeat returned {}: {}",
+                    status,
+                    text
+                ))
             }
         }
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
         let resp = self
-            .client
-            .delete(&self.lease_url(key))
-            .bearer_auth(&self.token)
+            .auth(self.client.delete(&self.lease_url(key)))
             .send()
             .await
             .map_err(|e| anyhow!("HTTP lease release failed: {}", e))?;
@@ -238,7 +251,10 @@ impl LeaseStore for CinchLeaseStore {
         match resp.status() {
             reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND => Ok(()),
             status => {
-                let text = resp.text().await.unwrap_or_else(|_| "<error reading body>".to_string());
+                let text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<error reading body>".to_string());
                 Err(anyhow!("HTTP lease release returned {}: {}", status, text))
             }
         }
@@ -330,7 +346,11 @@ mod tests {
 
         let rev = state.next_rev().await;
         store.insert(params.key, (data, rev));
-        (StatusCode::CREATED, Json(serde_json::json!({ "fence": rev }))).into_response()
+        (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "fence": rev })),
+        )
+            .into_response()
     }
 
     async fn mock_heartbeat(
@@ -354,7 +374,11 @@ mod tests {
             Some((_, current_rev)) if *current_rev == expected_fence => {
                 let new_rev = state.next_rev().await;
                 store.insert(params.key, (data, new_rev));
-                (StatusCode::OK, Json(serde_json::json!({ "fence": new_rev }))).into_response()
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "fence": new_rev })),
+                )
+                    .into_response()
             }
             _ => StatusCode::CONFLICT.into_response(),
         }
@@ -400,7 +424,10 @@ mod tests {
     async fn test_read_nonexistent() {
         let (url, _h) = start_mock_server().await;
         let store = CinchLeaseStore::new(&url, "test-token");
-        let result = store.read("no-such-key").await.expect("read should succeed");
+        let result = store
+            .read("no-such-key")
+            .await
+            .expect("read should succeed");
         assert!(result.is_none());
     }
 
@@ -416,7 +443,11 @@ mod tests {
         assert!(cas.success);
         assert!(cas.etag.is_some());
 
-        let read = store.read("lease1").await.expect("read").expect("should exist");
+        let read = store
+            .read("lease1")
+            .await
+            .expect("read")
+            .expect("should exist");
         assert_eq!(read.0, b"node-a");
         assert_eq!(read.1, cas.etag.unwrap());
     }
