@@ -34,6 +34,9 @@ struct MockState {
     required_fence: Arc<Mutex<Option<u64>>>,
     /// Auth token the server expects.
     token: String,
+    /// If set, every request must include this internal `database_id` query
+    /// parameter. Public-token tests leave this unset.
+    required_database_id: Option<String>,
     /// If > 0, the next N requests that touch these counters return 503.
     /// Used to exercise retry/backoff paths. Decremented once per triggered
     /// 503 response.
@@ -51,19 +54,49 @@ impl MockState {
             objects: Arc::new(Mutex::new(HashMap::new())),
             required_fence: Arc::new(Mutex::new(None)),
             token: token.to_string(),
+            required_database_id: None,
             flaky_write_failures: Arc::new(AtomicU32::new(0)),
             empty_truncated_count: Arc::new(AtomicU32::new(0)),
             batch_delete_failed_count: Arc::new(AtomicU32::new(0)),
         }
     }
+
+    fn with_required_database_id(mut self, database_id: &str) -> Self {
+        self.required_database_id = Some(database_id.to_string());
+        self
+    }
 }
 
 fn check_auth(headers: &HeaderMap, expected: &str) -> bool {
+    if expected.is_empty() {
+        return headers.get("authorization").is_none();
+    }
     headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .map(|v| v == format!("Bearer {expected}"))
         .unwrap_or(false)
+}
+
+#[derive(Deserialize)]
+struct ScopeParams {
+    database_id: Option<String>,
+}
+
+fn check_request_scope(
+    state: &MockState,
+    headers: &HeaderMap,
+    database_id: Option<&str>,
+) -> Result<(), StatusCode> {
+    if !check_auth(headers, &state.token) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if let Some(expected) = state.required_database_id.as_deref() {
+        if database_id != Some(expected) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    Ok(())
 }
 
 async fn check_fence(state: &MockState, headers: &HeaderMap) -> Result<(), StatusCode> {
@@ -97,12 +130,11 @@ fn trigger_flaky(state: &MockState) -> bool {
 async fn mock_put(
     State(state): State<MockState>,
     Path(key): Path<String>,
+    Query(scope): Query<ScopeParams>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    if !check_auth(&headers, &state.token) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    check_request_scope(&state, &headers, scope.database_id.as_deref())?;
     if trigger_flaky(&state) {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -134,11 +166,10 @@ fn etag_for(bytes: &[u8]) -> String {
 async fn mock_get(
     State(state): State<MockState>,
     Path(key): Path<String>,
+    Query(scope): Query<ScopeParams>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    if !check_auth(&headers, &state.token) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    check_request_scope(&state, &headers, scope.database_id.as_deref())?;
     let objects = state.objects.lock().await;
     let Some(data) = objects.get(&key).cloned() else {
         return Err(StatusCode::NOT_FOUND);
@@ -162,11 +193,10 @@ async fn mock_get(
 async fn mock_head(
     State(state): State<MockState>,
     Path(key): Path<String>,
+    Query(scope): Query<ScopeParams>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    if !check_auth(&headers, &state.token) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    check_request_scope(&state, &headers, scope.database_id.as_deref())?;
     if state.objects.lock().await.contains_key(&key) {
         Ok(StatusCode::OK)
     } else {
@@ -177,11 +207,10 @@ async fn mock_head(
 async fn mock_delete(
     State(state): State<MockState>,
     Path(key): Path<String>,
+    Query(scope): Query<ScopeParams>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    if !check_auth(&headers, &state.token) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    check_request_scope(&state, &headers, scope.database_id.as_deref())?;
     check_fence(&state, &headers).await?;
     state.objects.lock().await.remove(&key);
     Ok(StatusCode::NO_CONTENT)
@@ -191,6 +220,7 @@ async fn mock_delete(
 struct ListParams {
     prefix: Option<String>,
     after: Option<String>,
+    database_id: Option<String>,
 }
 
 async fn mock_list(
@@ -198,9 +228,7 @@ async fn mock_list(
     Query(params): Query<ListParams>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    if !check_auth(&headers, &state.token) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    check_request_scope(&state, &headers, params.database_id.as_deref())?;
 
     // Protocol-violation simulator: return empty-but-truncated for the
     // configured number of responses, then behave normally.
@@ -235,12 +263,11 @@ struct BatchDeleteBody {
 
 async fn mock_batch_delete(
     State(state): State<MockState>,
+    Query(scope): Query<ScopeParams>,
     headers: HeaderMap,
     Json(body): Json<BatchDeleteBody>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    if !check_auth(&headers, &state.token) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    check_request_scope(&state, &headers, scope.database_id.as_deref())?;
     check_fence(&state, &headers).await?;
 
     let mut objects = state.objects.lock().await;
@@ -290,6 +317,10 @@ fn store(url: &str, token: &str) -> CinchHttpStorage {
     CinchHttpStorage::new(url, token, "pages")
 }
 
+fn internal_store(url: &str, database_id: &str) -> CinchHttpStorage {
+    CinchHttpStorage::new_internal(url, database_id, "pages")
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -301,6 +332,19 @@ async fn put_get_roundtrips() {
     s.put("k", b"hello").await.unwrap();
     let got = s.get("k").await.unwrap().unwrap();
     assert_eq!(got, b"hello");
+}
+
+#[tokio::test]
+async fn internal_store_scopes_requests_without_bearer() {
+    let database_id = "_system/placement-db";
+    let state = MockState::new("").with_required_database_id(database_id);
+    let (url, _h) = start_mock(state).await;
+    let s = internal_store(&url, database_id);
+
+    s.put("k", b"hello").await.unwrap();
+    let got = s.get("k").await.unwrap().unwrap();
+    assert_eq!(got, b"hello");
+    assert!(s.exists("k").await.unwrap());
 }
 
 #[tokio::test]

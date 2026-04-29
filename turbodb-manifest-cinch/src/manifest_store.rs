@@ -57,6 +57,7 @@ pub struct CinchManifestStore {
     client: reqwest::Client,
     endpoint: String,
     token: String,
+    internal_database_id: Option<String>,
     fence: Option<Arc<dyn FenceSource>>,
     max_retries: u32,
 }
@@ -75,9 +76,20 @@ impl CinchManifestStore {
             client,
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            internal_database_id: None,
             fence: None,
             max_retries: 3,
         }
+    }
+
+    /// Create a store for grabby's internal NoAuth listener. Requests carry
+    /// the system database id as `?database_id=...` and omit Bearer auth.
+    pub fn new_internal(endpoint: &str, database_id: &str) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build HTTP client");
+        Self::with_client_internal(client, endpoint, database_id)
     }
 
     /// Create with a custom reqwest client.
@@ -86,6 +98,23 @@ impl CinchManifestStore {
             client,
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            internal_database_id: None,
+            fence: None,
+            max_retries: 3,
+        }
+    }
+
+    /// Create an internal NoAuth store with a custom reqwest client.
+    pub fn with_client_internal(
+        client: reqwest::Client,
+        endpoint: &str,
+        database_id: &str,
+    ) -> Self {
+        Self {
+            client,
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            token: String::new(),
+            internal_database_id: Some(database_id.to_string()),
             fence: None,
             max_retries: 3,
         }
@@ -99,11 +128,16 @@ impl CinchManifestStore {
     }
 
     fn manifest_url(&self, key: &str) -> String {
-        format!(
+        let mut url = format!(
             "{}/v1/sync/manifest?key={}",
             self.endpoint,
             urlencoding::encode(key)
-        )
+        );
+        if let Some(database_id) = self.internal_database_id.as_deref() {
+            url.push_str("&database_id=");
+            url.push_str(&urlencoding::encode(database_id));
+        }
+        url
     }
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -304,6 +338,7 @@ mod tests {
     struct MockState {
         store: Arc<Mutex<HashMap<String, Manifest>>>,
         required_fence: Option<u64>,
+        required_database_id: Option<String>,
     }
 
     impl MockState {
@@ -311,6 +346,7 @@ mod tests {
             Self {
                 store: Arc::new(Mutex::new(HashMap::new())),
                 required_fence: None,
+                required_database_id: None,
             }
         }
 
@@ -318,6 +354,15 @@ mod tests {
             Self {
                 store: Arc::new(Mutex::new(HashMap::new())),
                 required_fence: Some(required_fence),
+                required_database_id: None,
+            }
+        }
+
+        fn with_required_database_id(database_id: &str) -> Self {
+            Self {
+                store: Arc::new(Mutex::new(HashMap::new())),
+                required_fence: None,
+                required_database_id: Some(database_id.to_string()),
             }
         }
     }
@@ -325,6 +370,16 @@ mod tests {
     #[derive(Deserialize)]
     struct KeyParam {
         key: String,
+        database_id: Option<String>,
+    }
+
+    fn check_database_id(state: &MockState, params: &KeyParam) -> Result<(), Response> {
+        if let Some(expected) = state.required_database_id.as_deref() {
+            if params.database_id.as_deref() != Some(expected) {
+                return Err(StatusCode::BAD_REQUEST.into_response());
+            }
+        }
+        Ok(())
     }
 
     fn msgpack_response(status: StatusCode, body: Vec<u8>) -> Response {
@@ -335,6 +390,9 @@ mod tests {
     }
 
     async fn mock_get(State(state): State<MockState>, Query(params): Query<KeyParam>) -> Response {
+        if let Err(resp) = check_database_id(&state, &params) {
+            return resp;
+        }
         let store = state.store.lock().await;
         match store.get(&params.key) {
             Some(manifest) => {
@@ -351,6 +409,9 @@ mod tests {
         headers: HeaderMap,
         body: axum::body::Bytes,
     ) -> Response {
+        if let Err(resp) = check_database_id(&state, &params) {
+            return resp;
+        }
         let incoming: Manifest = match rmp_serde::from_slice(&body) {
             Ok(m) => m,
             Err(e) => return (StatusCode::BAD_REQUEST, format!("decode: {e}")).into_response(),
@@ -398,6 +459,9 @@ mod tests {
     }
 
     async fn mock_head(State(state): State<MockState>, Query(params): Query<KeyParam>) -> Response {
+        if let Err(resp) = check_database_id(&state, &params) {
+            return resp;
+        }
         let store = state.store.lock().await;
         match store.get(&params.key) {
             Some(manifest) => {
@@ -450,6 +514,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn internal_manifest_url_includes_database_id() {
+        let store =
+            CinchManifestStore::new_internal("https://example.com/", "_system/cp-config-db");
+        assert_eq!(
+            store.manifest_url("db1"),
+            "https://example.com/v1/sync/manifest?key=db1&database_id=_system%2Fcp-config-db"
+        );
+    }
+
     struct StaticFence(Option<u64>);
 
     impl FenceSource for StaticFence {
@@ -479,6 +553,22 @@ mod tests {
         assert_eq!(fetched.version, 1);
         assert_eq!(fetched.writer_id, "node-1");
         assert_eq!(fetched.payload, b"test-payload");
+    }
+
+    #[tokio::test]
+    async fn test_internal_put_create_and_get() {
+        let database_id = "_system/token-db";
+        let (url, _h) =
+            start_mock_server_with_state(MockState::with_required_database_id(database_id)).await;
+        let store = CinchManifestStore::new_internal(&url, database_id);
+
+        let m = make_manifest("node-1");
+        let res = store.put("db1", &m, None).await.expect("put");
+        assert!(res.success);
+
+        let fetched = store.get("db1").await.expect("get").expect("should exist");
+        assert_eq!(fetched.version, 1);
+        assert_eq!(fetched.writer_id, "node-1");
     }
 
     #[tokio::test]

@@ -73,10 +73,16 @@ const PATH_UNSAFE: &AsciiSet = &CONTROLS
     .add(b'|')
     .add(b'}');
 
+/// Characters that must be percent-encoded inside a query parameter value.
+/// Unlike path keys, `/` must be encoded here so `_system/placement-db` stays
+/// a single `database_id` value instead of looking path-like in logs/tools.
+const QUERY_UNSAFE: &AsciiSet = &PATH_UNSAFE.add(b'/').add(b'&').add(b'=').add(b'+');
+
 pub struct CinchHttpStorage {
     client: reqwest::Client,
     endpoint: String,
     token: String,
+    internal_database_id: Option<String>,
     /// URL path segment after `/v1/sync/`, e.g. `"pages"` for turbolite page
     /// storage, `"wal"` for walrust WAL frames.
     prefix: String,
@@ -103,6 +109,21 @@ impl CinchHttpStorage {
         Self::with_client(client, endpoint, token, prefix)
     }
 
+    /// Construct a client for grabby's internal NoAuth listener. Requests carry
+    /// the system database id as `?database_id=...` and intentionally skip
+    /// Bearer auth.
+    pub fn new_internal(
+        endpoint: impl Into<String>,
+        database_id: impl Into<String>,
+        prefix: impl Into<String>,
+    ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .build()
+            .expect("reqwest client build should not fail with default config");
+        Self::with_client_internal(client, endpoint, database_id, prefix)
+    }
+
     /// Construct with a caller-provided HTTP client. Useful for sharing
     /// connection pools, timeouts, or proxies across stores.
     pub fn with_client(
@@ -111,10 +132,37 @@ impl CinchHttpStorage {
         token: impl Into<String>,
         prefix: impl Into<String>,
     ) -> Self {
+        Self::with_client_mode(client, endpoint, token.into(), prefix, None)
+    }
+
+    /// Construct an internal NoAuth client with a caller-provided HTTP client.
+    pub fn with_client_internal(
+        client: reqwest::Client,
+        endpoint: impl Into<String>,
+        database_id: impl Into<String>,
+        prefix: impl Into<String>,
+    ) -> Self {
+        Self::with_client_mode(
+            client,
+            endpoint,
+            String::new(),
+            prefix,
+            Some(database_id.into()),
+        )
+    }
+
+    fn with_client_mode(
+        client: reqwest::Client,
+        endpoint: impl Into<String>,
+        token: String,
+        prefix: impl Into<String>,
+        internal_database_id: Option<String>,
+    ) -> Self {
         Self {
             client,
             endpoint: endpoint.into().trim_end_matches('/').to_string(),
-            token: token.into(),
+            token,
+            internal_database_id,
             prefix: prefix.into(),
             fence: None,
             max_retries: DEFAULT_MAX_RETRIES,
@@ -164,20 +212,33 @@ impl CinchHttpStorage {
     fn object_url(&self, key: &str) -> String {
         let encoded_prefix = utf8_percent_encode(&self.prefix, PATH_UNSAFE);
         let encoded_key = utf8_percent_encode(key, PATH_UNSAFE);
-        format!(
+        self.with_internal_database_query(format!(
             "{}/v1/sync/{}/{}",
             self.endpoint, encoded_prefix, encoded_key
-        )
+        ))
     }
 
     fn list_url(&self) -> String {
         let encoded_prefix = utf8_percent_encode(&self.prefix, PATH_UNSAFE);
-        format!("{}/v1/sync/{}", self.endpoint, encoded_prefix)
+        self.with_internal_database_query(format!("{}/v1/sync/{}", self.endpoint, encoded_prefix))
     }
 
     fn batch_delete_url(&self) -> String {
         let encoded_prefix = utf8_percent_encode(&self.prefix, PATH_UNSAFE);
-        format!("{}/v1/sync/{}/_delete", self.endpoint, encoded_prefix)
+        self.with_internal_database_query(format!(
+            "{}/v1/sync/{}/_delete",
+            self.endpoint, encoded_prefix
+        ))
+    }
+
+    fn with_internal_database_query(&self, base: String) -> String {
+        match &self.internal_database_id {
+            Some(database_id) => {
+                let encoded_database_id = utf8_percent_encode(database_id, QUERY_UNSAFE);
+                format!("{base}?database_id={encoded_database_id}")
+            }
+            None => base,
+        }
     }
 
     /// Add `Authorization: Bearer` header when a non-empty token is configured.
@@ -778,6 +839,24 @@ mod tests {
         assert_eq!(
             s.batch_delete_url(),
             "https://example.com/v1/sync/pages/_delete"
+        );
+    }
+
+    #[test]
+    fn internal_urls_include_database_id() {
+        let s =
+            CinchHttpStorage::new_internal("https://example.com/", "_system/placement-db", "pages");
+        assert_eq!(
+            s.object_url("p/d/0_v1"),
+            "https://example.com/v1/sync/pages/p/d/0_v1?database_id=_system%2Fplacement-db"
+        );
+        assert_eq!(
+            s.list_url(),
+            "https://example.com/v1/sync/pages?database_id=_system%2Fplacement-db"
+        );
+        assert_eq!(
+            s.batch_delete_url(),
+            "https://example.com/v1/sync/pages/_delete?database_id=_system%2Fplacement-db"
         );
     }
 
