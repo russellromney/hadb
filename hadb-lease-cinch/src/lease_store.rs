@@ -35,24 +35,39 @@ struct LeaseWriteResponse {
 
 /// LeaseStore backed by an HTTP endpoint.
 ///
-/// Authenticates with a Bearer token. The server owns any database/tenant
-/// scoping: the token identifies the scope, the `key` identifies the
-/// lease within it (default `"writer"`; override via [`with_lease_key`]).
+/// Two modes:
+///
+/// - **Public (token-scoped):** [`CinchLeaseStore::new`]. Authenticates
+///   with a per-database Bearer token; the server scopes leases by
+///   whatever that token identifies, and `key` identifies the lease
+///   within that scope.
+/// - **Internal (no auth, scope on the wire):**
+///   [`CinchLeaseStore::new_internal`]. For system DBs whose token would
+///   create a bootstrap cycle (e.g. `_system/token-db` cannot mint its
+///   own auth). No Bearer header is sent; `database_id` rides as a
+///   URL-encoded query parameter alongside `key`. The transport must be
+///   network-isolated; auth is by topology.
 pub struct CinchLeaseStore {
     client: reqwest::Client,
     endpoint: String,
     token: String,
     /// Returned by `key_for(_)` — the on-server lease name within whatever
-    /// scope the token identifies. Defaults to `"writer"` since each token
-    /// covers exactly one writable database.
+    /// scope the token (or `internal_database_id`) identifies. Defaults
+    /// to `"writer"` since each token covers exactly one writable
+    /// database.
     lease_key: String,
+    /// `Some(database_id)` for internal mode — sent as a query parameter
+    /// because the internal listener does not consult Bearer tokens.
+    /// `None` for public mode.
+    internal_database_id: Option<String>,
 }
 
 impl CinchLeaseStore {
-    /// Create a new HTTP lease store. `token` is sent as a Bearer token on
-    /// every request; the server scopes leases by whatever that token
-    /// identifies. `key_for(_)` returns `"writer"` by default — override
-    /// with [`with_lease_key`] if you need a different name.
+    /// Create a new HTTP lease store in public (token-scoped) mode.
+    /// `token` is sent as a Bearer token on every request; the server
+    /// scopes leases by whatever that token identifies. `key_for(_)`
+    /// returns `"writer"` by default — override with [`with_lease_key`]
+    /// if you need a different name.
     pub fn new(endpoint: &str, token: &str) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -63,6 +78,31 @@ impl CinchLeaseStore {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
             lease_key: "writer".to_string(),
+            internal_database_id: None,
+        }
+    }
+
+    /// Create a lease store for grabby's internal NoAuth listener.
+    ///
+    /// `database_id` is carried on every request as a URL-encoded query
+    /// parameter (`?database_id=...`); no Bearer token is sent. Used for
+    /// system DBs (`_system/token-db`, `_system/placement-db`,
+    /// `_system/cp-config-db`) where a token-scoped lease would require
+    /// auth material the system DB itself stores. The server is expected
+    /// to be reachable only over a trusted network (Fly 6PN / private
+    /// subnet / `.internal` DNS); confidentiality and integrity rest on
+    /// transport isolation, not on this client.
+    pub fn new_internal(internal_endpoint: &str, database_id: &str) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build HTTP client");
+        Self {
+            client,
+            endpoint: internal_endpoint.trim_end_matches('/').to_string(),
+            token: String::new(),
+            lease_key: "writer".to_string(),
+            internal_database_id: Some(database_id.to_string()),
         }
     }
 
@@ -73,23 +113,30 @@ impl CinchLeaseStore {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
             lease_key: "writer".to_string(),
+            internal_database_id: None,
         }
     }
 
     /// Override the lease name `key_for(_)` returns. The Coordinator passes
-    /// the database name as `scope`, but Cinch's HTTP server already scopes
-    /// by token, so the scope is intentionally ignored.
+    /// the database name as `scope`, but the Cinch HTTP server already
+    /// scopes by token (public mode) or by query-param `database_id`
+    /// (internal mode), so the scope is intentionally ignored here.
     pub fn with_lease_key(mut self, key: &str) -> Self {
         self.lease_key = key.to_string();
         self
     }
 
     fn lease_url(&self, key: &str) -> String {
-        format!(
+        let mut url = format!(
             "{}/v1/lease?key={}",
             self.endpoint,
             urlencoding::encode(key)
-        )
+        );
+        if let Some(database_id) = &self.internal_database_id {
+            url.push_str("&database_id=");
+            url.push_str(&urlencoding::encode(database_id));
+        }
+        url
     }
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -303,6 +350,21 @@ mod tests {
     #[derive(Deserialize)]
     struct KeyParam {
         key: String,
+        /// Internal-mode tenant scoping. `None` for public token-scoped
+        /// requests; in those tests the token (or a fixed bucket) is the
+        /// scope. When present, the mock composes a `database_id|key`
+        /// store key so two distinct database_ids cannot collide on the
+        /// same `key=writer`.
+        database_id: Option<String>,
+    }
+
+    impl KeyParam {
+        fn store_key(&self) -> String {
+            match &self.database_id {
+                Some(db) => format!("{}|{}", db, self.key),
+                None => self.key.clone(),
+            }
+        }
     }
 
     #[derive(Deserialize)]
@@ -314,8 +376,9 @@ mod tests {
         State(state): State<MockState>,
         Query(params): Query<KeyParam>,
     ) -> impl IntoResponse {
+        let store_key = params.store_key();
         let store = state.store.lock().await;
-        match store.get(&params.key) {
+        match store.get(&store_key) {
             Some((data, rev)) => {
                 use base64::Engine;
                 let holder = base64::engine::general_purpose::STANDARD.encode(data);
@@ -339,13 +402,14 @@ mod tests {
             .decode(&body.data)
             .expect("invalid base64");
 
+        let store_key = params.store_key();
         let mut store = state.store.lock().await;
-        if store.contains_key(&params.key) {
+        if store.contains_key(&store_key) {
             return (StatusCode::CONFLICT, "Lease already held").into_response();
         }
 
         let rev = state.next_rev().await;
-        store.insert(params.key, (data, rev));
+        store.insert(store_key, (data, rev));
         (
             StatusCode::CREATED,
             Json(serde_json::json!({ "fence": rev })),
@@ -369,11 +433,12 @@ mod tests {
             None => return StatusCode::BAD_REQUEST.into_response(),
         };
 
+        let store_key = params.store_key();
         let mut store = state.store.lock().await;
-        match store.get(&params.key) {
+        match store.get(&store_key) {
             Some((_, current_rev)) if *current_rev == expected_fence => {
                 let new_rev = state.next_rev().await;
-                store.insert(params.key, (data, new_rev));
+                store.insert(store_key, (data, new_rev));
                 (
                     StatusCode::OK,
                     Json(serde_json::json!({ "fence": new_rev })),
@@ -388,7 +453,8 @@ mod tests {
         State(state): State<MockState>,
         Query(params): Query<KeyParam>,
     ) -> impl IntoResponse {
-        state.store.lock().await.remove(&params.key);
+        let store_key = params.store_key();
+        state.store.lock().await.remove(&store_key);
         StatusCode::NO_CONTENT
     }
 
@@ -593,5 +659,164 @@ mod tests {
 
         // Fence should be a parseable u64 (NATS revision)
         let _: u64 = fence.parse().expect("fence should be a numeric string");
+    }
+
+    // ── Internal-mode tests (Hoist prereq) ──
+
+    #[test]
+    fn test_internal_url_includes_database_id() {
+        let store = CinchLeaseStore::new_internal(
+            "http://grabby.internal:8010",
+            "_system/placement-db",
+        );
+        let url = store.lease_url("writer");
+        assert!(url.contains("key=writer"), "url missing key: {}", url);
+        assert!(
+            url.contains("database_id=_system%2Fplacement-db"),
+            "url missing url-encoded database_id: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_public_url_omits_database_id() {
+        let store = CinchLeaseStore::new("http://grabby.example.com", "tok");
+        let url = store.lease_url("writer");
+        assert!(url.contains("key=writer"));
+        assert!(
+            !url.contains("database_id="),
+            "public mode must not send database_id: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_internal_mode_skips_bearer() {
+        // Empty token → auth() does not set Bearer header (existing
+        // behavior pinned for the internal-mode contract).
+        let store = CinchLeaseStore::new_internal(
+            "http://grabby.internal:8010",
+            "_system/token-db",
+        );
+        assert!(store.token.is_empty());
+        assert!(store.internal_database_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_internal_acquire_and_read() {
+        let (url, _h) = start_mock_server().await;
+        let store =
+            CinchLeaseStore::new_internal(&url, "_system/placement-db");
+
+        let cas = store
+            .write_if_not_exists("writer", b"placement-instance-A".to_vec())
+            .await
+            .expect("acquire");
+        assert!(cas.success);
+
+        let read = store
+            .read("writer")
+            .await
+            .expect("read")
+            .expect("should exist");
+        assert_eq!(read.0, b"placement-instance-A");
+    }
+
+    #[tokio::test]
+    async fn test_internal_database_ids_do_not_collide() {
+        // The system DBs all use key="writer". Without database_id
+        // scoping on the wire, three separate `_system/...` writers
+        // would fight over one record. This test pins that the wire
+        // shape carries database_id so two distinct system DBs can
+        // each hold their own writer lease independently.
+        let (url, _h) = start_mock_server().await;
+        let placement = CinchLeaseStore::new_internal(&url, "_system/placement-db");
+        let token_db = CinchLeaseStore::new_internal(&url, "_system/token-db");
+
+        let p = placement
+            .write_if_not_exists("writer", b"placement-A".to_vec())
+            .await
+            .expect("placement acquire");
+        assert!(p.success, "placement acquire should succeed");
+
+        // token-db's acquire on the same key="writer" must NOT see a
+        // conflict because the mock scopes by (database_id, key).
+        let t = token_db
+            .write_if_not_exists("writer", b"token-A".to_vec())
+            .await
+            .expect("token-db acquire");
+        assert!(
+            t.success,
+            "token-db acquire should not collide with placement-db"
+        );
+
+        let p_read = placement.read("writer").await.expect("p read").expect("p exists");
+        let t_read = token_db.read("writer").await.expect("t read").expect("t exists");
+        assert_eq!(p_read.0, b"placement-A");
+        assert_eq!(t_read.0, b"token-A");
+    }
+
+    #[tokio::test]
+    async fn test_internal_heartbeat_with_correct_fence() {
+        let (url, _h) = start_mock_server().await;
+        let store = CinchLeaseStore::new_internal(&url, "_system/cp-config-db");
+
+        let acquire = store
+            .write_if_not_exists("writer", b"v1".to_vec())
+            .await
+            .expect("acquire");
+        let fence = acquire.etag.expect("fence");
+
+        let heartbeat = store
+            .write_if_match("writer", b"v2".to_vec(), &fence)
+            .await
+            .expect("heartbeat");
+        assert!(heartbeat.success);
+
+        let (data, _) = store.read("writer").await.expect("read").expect("exists");
+        assert_eq!(data, b"v2");
+    }
+
+    #[tokio::test]
+    async fn test_internal_release_and_reacquire() {
+        let (url, _h) = start_mock_server().await;
+        let store = CinchLeaseStore::new_internal(&url, "_system/token-db");
+
+        store
+            .write_if_not_exists("writer", b"v1".to_vec())
+            .await
+            .expect("acquire");
+        store.delete("writer").await.expect("release");
+
+        let read = store.read("writer").await.expect("read");
+        assert!(read.is_none(), "lease should be gone after release");
+
+        let reacquire = store
+            .write_if_not_exists("writer", b"v2".to_vec())
+            .await
+            .expect("re-acquire");
+        assert!(reacquire.success);
+    }
+
+    #[tokio::test]
+    async fn test_internal_two_contenders_one_wins() {
+        // Pinned by the Hoist plan: two writers race the initial claim
+        // for the same system DB; exactly one wins.
+        let (url, _h) = start_mock_server().await;
+        let writer_a =
+            CinchLeaseStore::new_internal(&url, "_system/placement-db");
+        let writer_b =
+            CinchLeaseStore::new_internal(&url, "_system/placement-db");
+
+        let a = writer_a
+            .write_if_not_exists("writer", b"A".to_vec())
+            .await
+            .expect("a acquire");
+        let b = writer_b
+            .write_if_not_exists("writer", b"B".to_vec())
+            .await
+            .expect("b acquire");
+
+        assert!(a.success != b.success, "exactly one must win");
     }
 }

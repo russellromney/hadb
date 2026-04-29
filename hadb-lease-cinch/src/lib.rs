@@ -12,7 +12,15 @@
 //! ```ignore
 //! use hadb_lease_cinch::{CinchLeaseStore, AtomicFence};
 //!
+//! // Public mode: per-database Bearer token.
 //! let store = CinchLeaseStore::new("https://lease-proxy.example.com", "my-token");
+//!
+//! // Internal mode: no auth, database_id on the wire. For system DBs.
+//! let system_store = CinchLeaseStore::new_internal(
+//!     "http://grabby.internal:8010",
+//!     "_system/placement-db",
+//! );
+//!
 //! let (fence, writer) = AtomicFence::new();
 //! ```
 
