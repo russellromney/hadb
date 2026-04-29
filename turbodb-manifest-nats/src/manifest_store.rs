@@ -110,8 +110,8 @@ impl ManifestStore for NatsManifestStore {
                 let (revision, current_version) = match &entry {
                     Some(e) => match e.operation {
                         kv::Operation::Put => {
-                            let current: Manifest = rmp_serde::from_slice(&e.value)
-                                .map_err(|err| {
+                            let current: Manifest =
+                                rmp_serde::from_slice(&e.value).map_err(|err| {
                                     anyhow!("failed to deserialize manifest: {}", err)
                                 })?;
                             (e.revision, current.version)
@@ -256,7 +256,10 @@ mod tests {
         let f = TestFixture::new().await;
 
         f.put("db1", &make_manifest("node-1"), None).await.unwrap();
-        let res = f.put("db1", &make_manifest("node-1"), Some(1)).await.unwrap();
+        let res = f
+            .put("db1", &make_manifest("node-1"), Some(1))
+            .await
+            .unwrap();
         assert!(res.success);
 
         let fetched = f.get("db1").await.unwrap().unwrap();
@@ -297,9 +300,14 @@ mod tests {
         let f = TestFixture::new().await;
 
         f.put("db1", &make_manifest("node-1"), None).await.unwrap();
-        f.put("db1", &make_manifest("node-1"), Some(1)).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), Some(1))
+            .await
+            .unwrap();
 
-        let res = f.put("db1", &make_manifest("node-1"), Some(1)).await.unwrap();
+        let res = f
+            .put("db1", &make_manifest("node-1"), Some(1))
+            .await
+            .unwrap();
         assert!(!res.success);
         f.cleanup().await;
     }
@@ -307,7 +315,10 @@ mod tests {
     #[tokio::test]
     async fn test_put_version_on_nonexistent() {
         let f = TestFixture::new().await;
-        let res = f.put("db1", &make_manifest("node-1"), Some(1)).await.unwrap();
+        let res = f
+            .put("db1", &make_manifest("node-1"), Some(1))
+            .await
+            .unwrap();
         assert!(!res.success);
         f.cleanup().await;
     }
@@ -319,10 +330,14 @@ mod tests {
         f.put("db1", &make_manifest("node-1"), None).await.unwrap();
         assert_eq!(f.get("db1").await.unwrap().unwrap().version, 1);
 
-        f.put("db1", &make_manifest("node-1"), Some(1)).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), Some(1))
+            .await
+            .unwrap();
         assert_eq!(f.get("db1").await.unwrap().unwrap().version, 2);
 
-        f.put("db1", &make_manifest("node-1"), Some(2)).await.unwrap();
+        f.put("db1", &make_manifest("node-1"), Some(2))
+            .await
+            .unwrap();
         assert_eq!(f.get("db1").await.unwrap().unwrap().version, 3);
         f.cleanup().await;
     }
@@ -332,7 +347,9 @@ mod tests {
         let f = TestFixture::new().await;
 
         f.put("db1", &make_manifest("node-1"), None).await.unwrap();
-        f.put("db1", &make_manifest("node-2"), Some(1)).await.unwrap();
+        f.put("db1", &make_manifest("node-2"), Some(1))
+            .await
+            .unwrap();
 
         let meta = f.meta("db1").await.unwrap().unwrap();
         assert_eq!(meta.version, 2);

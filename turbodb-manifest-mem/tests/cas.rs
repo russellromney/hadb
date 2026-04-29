@@ -278,7 +278,10 @@ async fn put_ignores_caller_version_on_create() {
     };
     store.put("db1", &m, None).await.unwrap();
     let fetched = store.get("db1").await.unwrap().unwrap();
-    assert_eq!(fetched.version, 1, "store must assign version 1, not caller's 999");
+    assert_eq!(
+        fetched.version, 1,
+        "store must assign version 1, not caller's 999"
+    );
 }
 
 #[tokio::test]
@@ -295,7 +298,10 @@ async fn put_ignores_caller_version_on_update() {
     };
     store.put("db1", &m2, Some(1)).await.unwrap();
     let fetched = store.get("db1").await.unwrap().unwrap();
-    assert_eq!(fetched.version, 2, "store must assign version 2, not caller's 500");
+    assert_eq!(
+        fetched.version, 2,
+        "store must assign version 2, not caller's 500"
+    );
 }
 
 #[tokio::test]

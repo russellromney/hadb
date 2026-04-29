@@ -91,7 +91,10 @@ impl Durability {
     pub fn replication_interval(&self) -> std::time::Duration {
         match self {
             Self::Checkpoint(_) => std::time::Duration::from_secs(3600),
-            Self::Continuous { replication_interval, .. } => *replication_interval,
+            Self::Continuous {
+                replication_interval,
+                ..
+            } => *replication_interval,
             Self::Cloud => std::time::Duration::from_secs(3600),
         }
     }

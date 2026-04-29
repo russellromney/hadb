@@ -206,10 +206,7 @@ impl ManifestStore for S3ManifestStore {
                     .ok_or_else(|| anyhow!("missing {} header", META_WRITER_ID))?
                     .clone();
 
-                Ok(Some(ManifestMeta {
-                    version,
-                    writer_id,
-                }))
+                Ok(Some(ManifestMeta { version, writer_id }))
             }
             Err(e) => {
                 if is_not_found(&e) {
@@ -257,8 +254,7 @@ mod tests {
                 "test-manifest-{}/",
                 uuid::Uuid::new_v4().to_string().replace('-', "")
             );
-            let config =
-                aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let client = aws_sdk_s3::Client::new(&config);
             let store = S3ManifestStore::new(client.clone(), bucket.clone());
             Self {
@@ -337,7 +333,10 @@ mod tests {
 
         f.put(&key, &make_manifest("node-1"), None).await.unwrap();
 
-        let res = f.put(&key, &make_manifest("node-1"), Some(1)).await.unwrap();
+        let res = f
+            .put(&key, &make_manifest("node-1"), Some(1))
+            .await
+            .unwrap();
         assert!(res.success);
 
         let fetched = f.get(&key).await.unwrap().expect("should exist");
@@ -385,9 +384,14 @@ mod tests {
         let key = f.key("db1");
 
         f.put(&key, &make_manifest("node-1"), None).await.unwrap();
-        f.put(&key, &make_manifest("node-1"), Some(1)).await.unwrap();
+        f.put(&key, &make_manifest("node-1"), Some(1))
+            .await
+            .unwrap();
 
-        let res = f.put(&key, &make_manifest("node-1"), Some(1)).await.unwrap();
+        let res = f
+            .put(&key, &make_manifest("node-1"), Some(1))
+            .await
+            .unwrap();
         assert!(!res.success);
         f.cleanup().await;
     }
@@ -397,7 +401,10 @@ mod tests {
         let f = TestFixture::new().await;
         let key = f.key("db1");
 
-        let res = f.put(&key, &make_manifest("node-1"), Some(1)).await.unwrap();
+        let res = f
+            .put(&key, &make_manifest("node-1"), Some(1))
+            .await
+            .unwrap();
         assert!(!res.success);
         f.cleanup().await;
     }
@@ -410,10 +417,14 @@ mod tests {
         f.put(&key, &make_manifest("node-1"), None).await.unwrap();
         assert_eq!(f.get(&key).await.unwrap().unwrap().version, 1);
 
-        f.put(&key, &make_manifest("node-1"), Some(1)).await.unwrap();
+        f.put(&key, &make_manifest("node-1"), Some(1))
+            .await
+            .unwrap();
         assert_eq!(f.get(&key).await.unwrap().unwrap().version, 2);
 
-        f.put(&key, &make_manifest("node-1"), Some(2)).await.unwrap();
+        f.put(&key, &make_manifest("node-1"), Some(2))
+            .await
+            .unwrap();
         assert_eq!(f.get(&key).await.unwrap().unwrap().version, 3);
         f.cleanup().await;
     }
@@ -428,7 +439,9 @@ mod tests {
         assert_eq!(meta1.version, 1);
         assert_eq!(meta1.writer_id, "node-1");
 
-        f.put(&key, &make_manifest("node-2"), Some(1)).await.unwrap();
+        f.put(&key, &make_manifest("node-2"), Some(1))
+            .await
+            .unwrap();
         let meta2 = f.meta(&key).await.unwrap().unwrap();
         assert_eq!(meta2.version, 2);
         assert_eq!(meta2.writer_id, "node-2");
@@ -461,7 +474,10 @@ mod tests {
         f.put(&key, &m, None).await.unwrap();
 
         let fetched = f.get(&key).await.unwrap().unwrap();
-        assert_eq!(fetched.version, 1, "store must assign version 1, not caller's 999");
+        assert_eq!(
+            fetched.version, 1,
+            "store must assign version 1, not caller's 999"
+        );
         f.cleanup().await;
     }
 }
