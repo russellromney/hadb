@@ -23,6 +23,17 @@ pub enum Role {
 }
 
 /// HA topology mode: how writes are coordinated.
+///
+/// Two-axis model paired with [`Role`]:
+/// - `HaMode` describes the cluster topology.
+/// - `Role` describes a node's behavior inside that topology.
+///
+/// Only [`HaMode::SingleWriter`] paired with [`Role::Leader`] or
+/// [`Role::Follower`] is fully implemented today. The other valid
+/// combinations are visible in the type system so consumers can choose
+/// deliberately, but downstream crates (`haqlite`, `haqlite-turbolite`)
+/// will bail at open time with an explicit "not yet implemented"
+/// message until the corresponding feature lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HaMode {
     /// One node claims a persistent lease at join and holds it until
@@ -139,14 +150,20 @@ impl Role {
         }
     }
 
-    /// Convert u8 back to Role. Panics if invalid value.
-    pub fn from_u8(val: u8) -> Self {
+    /// Convert u8 back to Role.
+    ///
+    /// Returns `Err` for any value outside the defined role tags. The
+    /// in-process [`AtomicRole`](crate::coordinator::AtomicRole) only
+    /// stores values it produced via [`Role::to_u8`] and unwraps with
+    /// `.expect(...)`. External callers reading a role tag from the
+    /// wire or storage must propagate the error instead of panicking.
+    pub fn from_u8(val: u8) -> Result<Self, &'static str> {
         match val {
-            0 => Role::Leader,
-            1 => Role::Follower,
-            2 => Role::Client,
-            3 => Role::LatentWriter,
-            _ => panic!("Invalid role value: {}", val),
+            0 => Ok(Role::Leader),
+            1 => Ok(Role::Follower),
+            2 => Ok(Role::Client),
+            3 => Ok(Role::LatentWriter),
+            _ => Err("invalid role tag (expected 0..=3)"),
         }
     }
 }
@@ -325,40 +342,75 @@ mod tests {
 
     #[test]
     fn test_role_from_u8() {
-        assert_eq!(Role::from_u8(0), Role::Leader);
-        assert_eq!(Role::from_u8(1), Role::Follower);
-        assert_eq!(Role::from_u8(2), Role::Client);
-        assert_eq!(Role::from_u8(3), Role::LatentWriter);
+        assert_eq!(Role::from_u8(0), Ok(Role::Leader));
+        assert_eq!(Role::from_u8(1), Ok(Role::Follower));
+        assert_eq!(Role::from_u8(2), Ok(Role::Client));
+        assert_eq!(Role::from_u8(3), Ok(Role::LatentWriter));
     }
 
     #[test]
     fn test_role_roundtrip() {
-        assert_eq!(Role::from_u8(Role::Leader.to_u8()), Role::Leader);
-        assert_eq!(Role::from_u8(Role::Follower.to_u8()), Role::Follower);
-        assert_eq!(Role::from_u8(Role::Client.to_u8()), Role::Client);
-        assert_eq!(
-            Role::from_u8(Role::LatentWriter.to_u8()),
-            Role::LatentWriter
+        for role in [
+            Role::Leader,
+            Role::Follower,
+            Role::Client,
+            Role::LatentWriter,
+        ] {
+            assert_eq!(Role::from_u8(role.to_u8()), Ok(role));
+        }
+    }
+
+    #[test]
+    fn test_role_from_u8_invalid() {
+        let err = Role::from_u8(4).expect_err("4 is outside the role tag range");
+        assert!(err.contains("invalid role tag"), "unexpected: {err}");
+        assert!(Role::from_u8(255).is_err());
+    }
+
+    #[test]
+    fn test_validate_mode_role_valid() {
+        // SingleWriter accepts Leader, Follower, Client.
+        assert!(validate_mode_role(HaMode::SingleWriter, Role::Leader).is_ok());
+        assert!(validate_mode_role(HaMode::SingleWriter, Role::Follower).is_ok());
+        assert!(validate_mode_role(HaMode::SingleWriter, Role::Client).is_ok());
+
+        // SharedWriter accepts LatentWriter, Client.
+        assert!(validate_mode_role(HaMode::SharedWriter, Role::LatentWriter).is_ok());
+        assert!(validate_mode_role(HaMode::SharedWriter, Role::Client).is_ok());
+    }
+
+    #[test]
+    fn test_validate_mode_role_rejects_singlewriter_latent() {
+        let err =
+            validate_mode_role(HaMode::SingleWriter, Role::LatentWriter).expect_err("invalid");
+        assert!(
+            err.contains("LatentWriter requires SharedWriter mode"),
+            "unexpected error: {err}"
         );
     }
 
     #[test]
-    #[should_panic(expected = "Invalid role value: 4")]
-    fn test_role_from_u8_invalid() {
-        Role::from_u8(4);
+    fn test_validate_mode_role_rejects_sharedwriter_leader() {
+        let err = validate_mode_role(HaMode::SharedWriter, Role::Leader).expect_err("invalid");
+        assert!(
+            err.contains("SharedWriter has no Leader/Follower"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
-    fn test_validate_mode_role() {
-        assert!(validate_mode_role(HaMode::SingleWriter, Role::Leader).is_ok());
-        assert!(validate_mode_role(HaMode::SingleWriter, Role::Follower).is_ok());
-        assert!(validate_mode_role(HaMode::SingleWriter, Role::Client).is_ok());
-        assert!(validate_mode_role(HaMode::SingleWriter, Role::LatentWriter).is_err());
+    fn test_validate_mode_role_rejects_sharedwriter_follower() {
+        let err = validate_mode_role(HaMode::SharedWriter, Role::Follower).expect_err("invalid");
+        assert!(
+            err.contains("SharedWriter has no Leader/Follower"),
+            "unexpected error: {err}"
+        );
+    }
 
-        assert!(validate_mode_role(HaMode::SharedWriter, Role::LatentWriter).is_ok());
-        assert!(validate_mode_role(HaMode::SharedWriter, Role::Client).is_ok());
-        assert!(validate_mode_role(HaMode::SharedWriter, Role::Leader).is_err());
-        assert!(validate_mode_role(HaMode::SharedWriter, Role::Follower).is_err());
+    #[test]
+    fn test_hamode_display_round_trip() {
+        assert_eq!(HaMode::SingleWriter.to_string(), "SingleWriter");
+        assert_eq!(HaMode::SharedWriter.to_string(), "SharedWriter");
     }
 
     #[test]

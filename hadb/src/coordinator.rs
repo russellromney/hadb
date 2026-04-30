@@ -36,6 +36,7 @@ impl AtomicRole {
 
     pub(crate) fn load(&self) -> Role {
         Role::from_u8(self.0.load(Ordering::SeqCst))
+            .expect("AtomicRole only stores values produced by Role::to_u8")
     }
 
     pub(crate) fn store(&self, role: Role) {
