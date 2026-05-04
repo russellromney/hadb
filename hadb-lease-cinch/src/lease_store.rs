@@ -665,10 +665,8 @@ mod tests {
 
     #[test]
     fn test_internal_url_includes_database_id() {
-        let store = CinchLeaseStore::new_internal(
-            "http://grabby.internal:8010",
-            "_system/placement-db",
-        );
+        let store =
+            CinchLeaseStore::new_internal("http://grabby.internal:8010", "_system/placement-db");
         let url = store.lease_url("writer");
         assert!(url.contains("key=writer"), "url missing key: {}", url);
         assert!(
@@ -694,10 +692,8 @@ mod tests {
     fn test_internal_mode_skips_bearer() {
         // Empty token → auth() does not set Bearer header (existing
         // behavior pinned for the internal-mode contract).
-        let store = CinchLeaseStore::new_internal(
-            "http://grabby.internal:8010",
-            "_system/token-db",
-        );
+        let store =
+            CinchLeaseStore::new_internal("http://grabby.internal:8010", "_system/token-db");
         assert!(store.token.is_empty());
         assert!(store.internal_database_id.is_some());
     }
@@ -705,8 +701,7 @@ mod tests {
     #[tokio::test]
     async fn test_internal_acquire_and_read() {
         let (url, _h) = start_mock_server().await;
-        let store =
-            CinchLeaseStore::new_internal(&url, "_system/placement-db");
+        let store = CinchLeaseStore::new_internal(&url, "_system/placement-db");
 
         let cas = store
             .write_if_not_exists("writer", b"placement-instance-A".to_vec())
@@ -750,8 +745,16 @@ mod tests {
             "token-db acquire should not collide with placement-db"
         );
 
-        let p_read = placement.read("writer").await.expect("p read").expect("p exists");
-        let t_read = token_db.read("writer").await.expect("t read").expect("t exists");
+        let p_read = placement
+            .read("writer")
+            .await
+            .expect("p read")
+            .expect("p exists");
+        let t_read = token_db
+            .read("writer")
+            .await
+            .expect("t read")
+            .expect("t exists");
         assert_eq!(p_read.0, b"placement-A");
         assert_eq!(t_read.0, b"token-A");
     }
@@ -803,10 +806,8 @@ mod tests {
         // Pinned by the Hoist plan: two writers race the initial claim
         // for the same system DB; exactly one wins.
         let (url, _h) = start_mock_server().await;
-        let writer_a =
-            CinchLeaseStore::new_internal(&url, "_system/placement-db");
-        let writer_b =
-            CinchLeaseStore::new_internal(&url, "_system/placement-db");
+        let writer_a = CinchLeaseStore::new_internal(&url, "_system/placement-db");
+        let writer_b = CinchLeaseStore::new_internal(&url, "_system/placement-db");
 
         let a = writer_a
             .write_if_not_exists("writer", b"A".to_vec())

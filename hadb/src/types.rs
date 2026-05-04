@@ -272,8 +272,14 @@ impl std::fmt::Debug for LeaseConfig {
     }
 }
 
+/// Hook run after a node wins leadership but before the replicator is
+/// registered. Useful for storage layers that need a fenced leader token
+/// before first local writes, while still needing those writes to exist before
+/// `Replicator::add` publishes or tracks the database.
+pub type LeaderSetupHook = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>;
+
 /// Top-level configuration for the Coordinator.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CoordinatorConfig {
     /// Replication durability mode. Default: `Durability::Replicated(1s)`.
     /// Carries the sync interval for `Replicated` variant.
@@ -297,6 +303,38 @@ pub struct CoordinatorConfig {
     /// handed to storage adapters that perform fenced writes.
     /// `None` = no fence enforcement.
     pub fence_writer: Option<Arc<hadb_lease::AtomicFenceWriter>>,
+    /// Optional leader setup hook. Runs after lease claim/fence update and
+    /// before `Replicator::add`.
+    pub before_leader_add: Option<LeaderSetupHook>,
+    /// Optional requested role. `None` keeps the old behavior: try to become
+    /// leader, otherwise follow and promote later. `Some(Role::Client)` joins
+    /// as a read-only consumer and never claims or promotes.
+    pub requested_role: Option<Role>,
+}
+
+impl std::fmt::Debug for CoordinatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoordinatorConfig")
+            .field("durability", &self.durability)
+            .field("snapshot_interval", &self.snapshot_interval)
+            .field("lease", &self.lease)
+            .field("follower_pull_interval", &self.follower_pull_interval)
+            .field("replicator_timeout", &self.replicator_timeout)
+            .field("manifest_poll_interval", &self.manifest_poll_interval)
+            .field(
+                "fence_writer",
+                &self.fence_writer.as_ref().map(|_| "<fence_writer>"),
+            )
+            .field(
+                "before_leader_add",
+                &self
+                    .before_leader_add
+                    .as_ref()
+                    .map(|_| "<leader_setup_hook>"),
+            )
+            .field("requested_role", &self.requested_role)
+            .finish()
+    }
 }
 
 impl Default for CoordinatorConfig {
@@ -309,6 +347,8 @@ impl Default for CoordinatorConfig {
             replicator_timeout: Duration::from_secs(30),
             manifest_poll_interval: Duration::from_secs(1),
             fence_writer: None,
+            before_leader_add: None,
+            requested_role: None,
         }
     }
 }

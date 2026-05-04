@@ -1,7 +1,7 @@
 //! Comprehensive tests for the Coordinator.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,6 +21,7 @@ use turbodb_manifest_mem::MemManifestStore;
 struct MockReplicator {
     calls: Arc<Mutex<Vec<String>>>,
     should_fail: Arc<AtomicBool>,
+    pull_delay_ms: Arc<AtomicU64>,
 }
 
 impl MockReplicator {
@@ -28,6 +29,7 @@ impl MockReplicator {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
             should_fail: Arc::new(AtomicBool::new(false)),
+            pull_delay_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -37,6 +39,11 @@ impl MockReplicator {
 
     fn set_fail(&self, fail: bool) {
         self.should_fail.store(fail, Ordering::SeqCst);
+    }
+
+    fn set_pull_delay(&self, delay: Duration) {
+        self.pull_delay_ms
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
     }
 }
 
@@ -51,6 +58,10 @@ impl Replicator for MockReplicator {
     }
 
     async fn pull(&self, name: &str, _path: &Path) -> Result<()> {
+        let delay_ms = self.pull_delay_ms.load(Ordering::SeqCst);
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
         if self.should_fail.load(Ordering::SeqCst) {
             return Err(anyhow!("mock replicator.pull failed"));
         }
@@ -211,6 +222,30 @@ async fn test_ha_join_as_leader() {
 }
 
 #[tokio::test]
+async fn test_client_join_does_not_claim_lease() {
+    let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+    let mut config = CoordinatorConfig::default();
+    config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
+        "reader-1".into(),
+        "127.0.0.1:8081".into(),
+    ));
+    config.requested_role = Some(Role::Client);
+
+    let (coordinator, replicator) = test_coordinator(config);
+
+    let db_path = PathBuf::from("/tmp/test-client.db");
+    let result = coordinator.join("testdb", &db_path).await.unwrap();
+
+    assert_eq!(result.role, Role::Client);
+    assert_eq!(coordinator.role("testdb").await, Some(Role::Client));
+    assert!(lease_store.read("testdb").await.unwrap().is_none());
+    assert_eq!(replicator.calls(), vec!["pull(testdb)"]);
+
+    coordinator.leave("testdb").await.unwrap();
+}
+
+#[tokio::test]
 async fn test_ha_leader_metrics() {
     let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
     let mut config = CoordinatorConfig::default();
@@ -231,6 +266,67 @@ async fn test_ha_leader_metrics() {
     assert_eq!(snapshot.lease_claims_attempted, 1);
     assert_eq!(snapshot.lease_claims_succeeded, 1);
     assert_eq!(snapshot.lease_claims_failed, 0);
+}
+
+#[tokio::test]
+async fn test_ha_leader_renews_while_initial_pull_is_still_running() {
+    let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+    let mut lease_config = LeaseConfig::new(
+        lease_store.clone(),
+        "instance-1".into(),
+        "127.0.0.1:8080".into(),
+    );
+    lease_config.renew_interval = Duration::from_millis(20);
+
+    let mut config = CoordinatorConfig::default();
+    config.lease = Some(lease_config);
+
+    let (coordinator, replicator) = test_coordinator(config);
+    replicator.set_pull_delay(Duration::from_millis(150));
+
+    let join_coordinator = coordinator.clone();
+    let join_handle = tokio::spawn(async move {
+        join_coordinator
+            .join("testdb", &PathBuf::from("/tmp/test.db"))
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    assert!(
+        !join_handle.is_finished(),
+        "test setup expected the initial pull to still be running"
+    );
+    assert!(
+        coordinator.metrics().snapshot().lease_renewals_succeeded > 0,
+        "leader lease should renew while slow leader setup is still running"
+    );
+
+    let result = join_handle.await.unwrap().unwrap();
+    assert_eq!(result.role, Role::Leader);
+    coordinator.leave("testdb").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ha_leader_setup_failure_releases_claimed_lease() {
+    let lease_store: Arc<dyn LeaseStore> = Arc::new(InMemoryLeaseStore::new());
+    let mut config = CoordinatorConfig::default();
+    config.lease = Some(LeaseConfig::new(
+        lease_store.clone(),
+        "instance-1".into(),
+        "127.0.0.1:8080".into(),
+    ));
+    config.before_leader_add = Some(Arc::new(|| Err(anyhow!("setup failed"))));
+
+    let (coordinator, _) = test_coordinator(config);
+
+    let err = coordinator
+        .join("testdb", &PathBuf::from("/tmp/test.db"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("before_leader_add hook failed"));
+    assert!(lease_store.read("testdb").await.unwrap().is_none());
+    assert!(!coordinator.contains("testdb").await);
 }
 
 #[tokio::test]

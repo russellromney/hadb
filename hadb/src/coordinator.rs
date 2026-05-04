@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::{broadcast, watch, RwLock};
 use tokio::task::JoinHandle;
 
@@ -125,6 +125,9 @@ impl Coordinator {
             Some(c) => c,
             None => {
                 // No HA — always leader.
+                if let Some(ref hook) = self.config.before_leader_add {
+                    hook().context("Coordinator: before_leader_add hook failed")?;
+                }
                 tokio::time::timeout(
                     self.config.replicator_timeout,
                     self.replicator.add(name, db_path),
@@ -173,6 +176,11 @@ impl Coordinator {
             &lease_config.address,
             lease_config.ttl_secs,
         );
+
+        if self.config.requested_role == Some(Role::Client) {
+            return self.join_client(name, db_path, lease, lease_config).await;
+        }
+
         if let Some(ref fw) = self.config.fence_writer {
             lease = lease.with_fence_writer(fw.clone());
         }
@@ -210,30 +218,6 @@ impl Coordinator {
 
         match role {
             Role::Leader => {
-                // Restore from S3 first: a previous leader may have written
-                // data that this node doesn't have locally. pull() is a no-op
-                // if no snapshot exists (first-ever leader).
-                let _ = tokio::time::timeout(
-                    self.config.replicator_timeout,
-                    self.replicator.pull(name, db_path),
-                )
-                .await;
-
-                // Start leader sync.
-                tokio::time::timeout(
-                    self.config.replicator_timeout,
-                    self.replicator.add(name, db_path),
-                )
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "Coordinator: replicator.add('{}') timed out after {:?}",
-                        name,
-                        self.config.replicator_timeout
-                    )
-                })??;
-
-                // Spawn lease renewal loop.
                 let replicator = self.replicator.clone();
                 let db_name = name.to_string();
                 let role_tx = self.role_tx.clone();
@@ -261,6 +245,53 @@ impl Coordinator {
                         role_ref.store(Role::Follower);
                     }
                 });
+
+                // Restore from S3 first: a previous leader may have written
+                // data that this node doesn't have locally. pull() is a no-op
+                // if no snapshot exists (first-ever leader).
+                let _ = tokio::time::timeout(
+                    self.config.replicator_timeout,
+                    self.replicator.pull(name, db_path),
+                )
+                .await;
+
+                if let Some(ref hook) = self.config.before_leader_add {
+                    if let Err(e) = hook() {
+                        self.cancel_leader_start(name, &cancel_tx, task_handle, lease_config)
+                            .await;
+                        return Err(e).context("Coordinator: before_leader_add hook failed");
+                    }
+                }
+
+                // Start leader sync.
+                let add_result = tokio::time::timeout(
+                    self.config.replicator_timeout,
+                    self.replicator.add(name, db_path),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Coordinator: replicator.add('{}') timed out after {:?}",
+                        name,
+                        self.config.replicator_timeout
+                    )
+                })
+                .and_then(|r| r);
+
+                if let Err(e) = add_result {
+                    self.cancel_leader_start(name, &cancel_tx, task_handle, lease_config)
+                        .await;
+                    return Err(e);
+                }
+
+                if shared_role.load() != Role::Leader {
+                    self.cancel_leader_start(name, &cancel_tx, task_handle, lease_config)
+                        .await;
+                    return Err(anyhow::anyhow!(
+                        "Coordinator: lost leader lease while starting '{}'",
+                        name
+                    ));
+                }
 
                 let leader_caught_up = Arc::new(AtomicBool::new(true));
                 let leader_position = Arc::new(AtomicU64::new(0));
@@ -380,6 +411,132 @@ impl Coordinator {
                 unreachable!("lease claiming only yields Leader or Follower")
             }
         }
+    }
+
+    async fn cancel_leader_start(
+        &self,
+        name: &str,
+        cancel_tx: &watch::Sender<bool>,
+        task_handle: JoinHandle<()>,
+        lease_config: &crate::types::LeaseConfig,
+    ) {
+        let _ = cancel_tx.send(true);
+        let _ = task_handle.await;
+        self.release_lease_if_owned(name, lease_config).await;
+    }
+
+    async fn release_lease_if_owned(&self, name: &str, lease_config: &crate::types::LeaseConfig) {
+        let lease_key = lease_config.store.key_for(name);
+        let lease = DbLease::new(
+            lease_config.store.clone(),
+            &lease_key,
+            &lease_config.instance_id,
+            &lease_config.address,
+            lease_config.ttl_secs,
+        );
+        match lease.read().await {
+            Ok(Some((data, _))) if data.instance_id == lease_config.instance_id => {
+                if let Err(e) = lease_config.store.delete(lease.lease_key()).await {
+                    tracing::error!("Coordinator: failed to release lease for '{}': {}", name, e);
+                }
+            }
+            Ok(Some((data, _))) => {
+                tracing::info!(
+                    "Coordinator: lease for '{}' held by {} (not us), skipping release",
+                    name,
+                    data.instance_id
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(
+                    "Coordinator: failed to read lease for '{}' during release: {}",
+                    name,
+                    e
+                );
+            }
+        }
+    }
+
+    async fn join_client(
+        self: &Arc<Self>,
+        name: &str,
+        db_path: &Path,
+        lease: DbLease,
+        lease_config: &crate::types::LeaseConfig,
+    ) -> Result<JoinResult> {
+        tokio::time::timeout(
+            self.config.replicator_timeout,
+            self.replicator.pull(name, db_path),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Coordinator: client replicator.pull('{}') timed out after {:?}",
+                name,
+                self.config.replicator_timeout
+            )
+        })??;
+
+        let leader_addr = Arc::new(RwLock::new(match lease.read().await {
+            Ok(Some((data, _))) => data.address,
+            _ => String::new(),
+        }));
+        let shared_role = Arc::new(AtomicRole::new(Role::Client));
+        let client_position = Arc::new(AtomicU64::new(0));
+        let client_caught_up = Arc::new(AtomicBool::new(false));
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+
+        let behavior = self.follower_behavior.clone();
+        let replicator = self.replicator.clone();
+        let prefix = self.prefix.clone();
+        let db_name = name.to_string();
+        let db_path_buf = db_path.to_path_buf();
+        let pull_interval = self.config.follower_pull_interval;
+        let metrics = self.metrics.clone();
+        let position = client_position.clone();
+        let caught_up = client_caught_up.clone();
+
+        let task_handle = tokio::spawn(async move {
+            let _ = behavior
+                .run_follower_loop(
+                    replicator,
+                    &prefix,
+                    &db_name,
+                    &db_path_buf,
+                    pull_interval,
+                    position,
+                    caught_up,
+                    cancel_rx,
+                    metrics,
+                )
+                .await;
+        });
+
+        self.databases.write().await.insert(
+            name.to_string(),
+            DbEntry {
+                role: shared_role,
+                leader_address: leader_addr,
+                cancel_tx,
+                task_handle,
+            },
+        );
+
+        let _ = self.role_tx.send(RoleEvent::Joined {
+            db_name: name.to_string(),
+            role: Role::Client,
+        });
+        tracing::info!(
+            instance_id = %lease_config.instance_id,
+            "Coordinator: '{}' joined as Client",
+            name
+        );
+        Ok(JoinResult {
+            role: Role::Client,
+            caught_up: client_caught_up,
+            position: client_position,
+        })
     }
 
     /// Run follower tasks (pull loop + lease monitor). The caller passes
