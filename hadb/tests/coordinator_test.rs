@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 use hadb::*;
 use turbodb::{Manifest, ManifestStore};
@@ -83,6 +83,51 @@ impl Replicator for MockReplicator {
         }
         self.calls.lock().unwrap().push(format!("sync({})", name));
         Ok(())
+    }
+}
+
+/// Lease store that lets a leader claim normally, then never completes renewal.
+/// This models a wedged lease backend/client while testing shutdown behavior.
+struct HangingRenewLeaseStore {
+    inner: InMemoryLeaseStore,
+    renew_started: Arc<Notify>,
+}
+
+impl HangingRenewLeaseStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryLeaseStore::new(),
+            renew_started: Arc::new(Notify::new()),
+        }
+    }
+
+    fn renew_started(&self) -> Arc<Notify> {
+        self.renew_started.clone()
+    }
+}
+
+#[async_trait]
+impl LeaseStore for HangingRenewLeaseStore {
+    async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
+        self.inner.read(key).await
+    }
+
+    async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult> {
+        self.inner.write_if_not_exists(key, data).await
+    }
+
+    async fn write_if_match(
+        &self,
+        _key: &str,
+        _data: Vec<u8>,
+        _etag: &str,
+    ) -> Result<CasResult> {
+        self.renew_started.notify_waiters();
+        std::future::pending::<Result<CasResult>>().await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key).await
     }
 }
 
@@ -665,6 +710,36 @@ async fn test_manifest_store_accessor_some() {
     );
 
     assert!(coordinator.manifest_store().is_some());
+}
+
+#[tokio::test]
+async fn test_leave_aborts_stuck_leader_renewal_task() {
+    let lease_store = Arc::new(HangingRenewLeaseStore::new());
+    let renew_started = lease_store.renew_started();
+
+    let mut config = CoordinatorConfig::default();
+    config.lease = Some(LeaseConfig::new(
+        lease_store,
+        "instance-1".into(),
+        "127.0.0.1:8080".into(),
+    ));
+
+    let (coordinator, replicator) = test_coordinator(config);
+    let db_path = PathBuf::from("/tmp/test_stuck_renewal.db");
+    let result = coordinator.join("ha_db1", &db_path).await.unwrap();
+    assert_eq!(result.role, Role::Leader);
+
+    tokio::time::timeout(Duration::from_secs(1), renew_started.notified())
+        .await
+        .expect("leader renewal should enter the lease store");
+
+    tokio::time::timeout(Duration::from_secs(1), coordinator.leave("ha_db1"))
+        .await
+        .expect("leave should not hang behind stuck lease renewal")
+        .unwrap();
+
+    assert!(!coordinator.contains("ha_db1").await);
+    assert!(replicator.calls().contains(&"remove(ha_db1)".to_string()));
 }
 
 #[tokio::test]

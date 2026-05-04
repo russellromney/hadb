@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::{broadcast, watch, RwLock};
@@ -84,6 +85,8 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
+    const BACKGROUND_TASK_CANCEL_GRACE: Duration = Duration::from_millis(250);
+
     /// Create a new Coordinator.
     ///
     /// `replicator` handles replication (snapshot + incremental updates).
@@ -421,8 +424,34 @@ impl Coordinator {
         lease_config: &crate::types::LeaseConfig,
     ) {
         let _ = cancel_tx.send(true);
-        let _ = task_handle.await;
+        self.await_cancelled_task(name, task_handle).await;
         self.release_lease_if_owned(name, lease_config).await;
+    }
+
+    async fn await_cancelled_task(&self, name: &str, task_handle: JoinHandle<()>) {
+        let mut task_handle = task_handle;
+        tokio::select! {
+            result = &mut task_handle => match result {
+                Ok(()) => {}
+                Err(e) if e.is_cancelled() => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "Coordinator: background task for '{}' exited with join error: {}",
+                        name,
+                        e
+                    );
+                }
+            },
+            _ = tokio::time::sleep(Self::BACKGROUND_TASK_CANCEL_GRACE) => {
+                task_handle.abort();
+                let _ = task_handle.await;
+                tracing::warn!(
+                    "Coordinator: aborted background task for '{}' after {:?} cancel grace",
+                    name,
+                    Self::BACKGROUND_TASK_CANCEL_GRACE
+                );
+            }
+        }
     }
 
     async fn release_lease_if_owned(&self, name: &str, lease_config: &crate::types::LeaseConfig) {
@@ -664,6 +693,7 @@ impl Coordinator {
 
         let _ = entry.cancel_tx.send(true);
         let role = entry.role.load();
+        self.await_cancelled_task(name, entry.task_handle).await;
 
         match role {
             Role::Leader => {
@@ -741,7 +771,6 @@ impl Coordinator {
             }
         }
 
-        let _ = entry.task_handle.await;
         Ok(())
     }
 
