@@ -1,10 +1,6 @@
 # hadb: cheap HA embedded databases
 
-> **Experimental / active development.** hadb is useful for exploration and
-> internal integration work, but it is not yet a stable public database
-> substrate. APIs, wire/storage formats, lease/fence behavior, and crate
-> boundaries may change without notice. Treat the README as a current working
-> model, not a compatibility promise.
+> **Experimental.** hadb is under active development and contains bugs. Be careful.
 
 hadb makes any embedded database highly available via cloud storage, without custom failover/restore logic.
 
