@@ -152,10 +152,32 @@ impl DbLease {
             self.update_fence_token();
             Ok(true)
         } else {
-            tracing::warn!("Lease renewal failed (ETag mismatch) — lost lease");
-            self.current_etag = None;
-            self.clear_fence_token();
-            Ok(false)
+            self.recover_ambiguous_renewal_conflict().await
+        }
+    }
+
+    async fn recover_ambiguous_renewal_conflict(&mut self) -> Result<bool> {
+        match self.read().await? {
+            Some((lease, etag))
+                if lease.instance_id == self.instance_id
+                    && lease.session_id == self.session_id
+                    && !lease.sleeping
+                    && !lease.is_expired() =>
+            {
+                tracing::warn!(
+                    "Lease renewal CAS conflict matched our current session on read-back — \
+                     treating prior ambiguous renewal as accepted"
+                );
+                self.current_etag = Some(etag);
+                self.update_fence_token();
+                Ok(true)
+            }
+            _ => {
+                tracing::warn!("Lease renewal failed (ETag mismatch) — lost lease");
+                self.current_etag = None;
+                self.clear_fence_token();
+                Ok(false)
+            }
         }
     }
 
@@ -533,6 +555,86 @@ mod tests {
         let renewed = lease1.renew().await.unwrap();
         assert!(!renewed);
         assert!(!lease1.has_etag());
+    }
+
+    struct AmbiguousCommitStore {
+        inner: MockLeaseStore,
+        fail_next_match_after_commit: Arc<Mutex<bool>>,
+    }
+
+    impl AmbiguousCommitStore {
+        fn new() -> Self {
+            Self {
+                inner: MockLeaseStore::new(),
+                fail_next_match_after_commit: Arc::new(Mutex::new(false)),
+            }
+        }
+
+        fn fail_next_match_after_commit(&self) {
+            *self.fail_next_match_after_commit.lock().unwrap() = true;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LeaseStore for AmbiguousCommitStore {
+        async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
+            self.inner.read(key).await
+        }
+
+        async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult> {
+            self.inner.write_if_not_exists(key, data).await
+        }
+
+        async fn write_if_match(&self, key: &str, data: Vec<u8>, etag: &str) -> Result<CasResult> {
+            if *self.fail_next_match_after_commit.lock().unwrap() {
+                let mut store = self.inner.data.lock().unwrap();
+                match store.get(key) {
+                    Some((_, current_etag)) if current_etag == etag => {
+                        let new_etag = self.inner.gen_etag();
+                        store.insert(key.to_string(), (data, new_etag));
+                        *self.fail_next_match_after_commit.lock().unwrap() = false;
+                        return Ok(CasResult {
+                            success: false,
+                            etag: None,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            self.inner.write_if_match(key, data, etag).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_renew_recovers_when_prior_commit_succeeded_but_response_was_lost() {
+        let store = Arc::new(AmbiguousCommitStore::new());
+        let (fence, writer) = AtomicFence::new();
+        let mut lease = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60)
+            .with_fence_writer(Arc::new(writer));
+
+        lease.try_claim().await.unwrap();
+        let session_before = lease.session_id().to_string();
+        let fence_after_claim = fence.current().expect("fence set after claim");
+
+        store.fail_next_match_after_commit();
+        let renewed = lease.renew().await.unwrap();
+
+        assert!(renewed, "same-session read-back should retain leadership");
+        assert_eq!(lease.session_id(), session_before);
+        assert!(lease.has_etag());
+        assert!(
+            fence.current().expect("fence after recovered renewal") > fence_after_claim,
+            "read-back recovery must advance the storage fence"
+        );
+
+        assert!(
+            lease.renew().await.unwrap(),
+            "subsequent renew should use the recovered etag"
+        );
     }
 
     #[tokio::test]

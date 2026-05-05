@@ -34,7 +34,7 @@
 //! exponential backoff, matching the other write paths.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -81,7 +81,7 @@ const QUERY_UNSAFE: &AsciiSet = &PATH_UNSAFE.add(b'/').add(b'&').add(b'=').add(b
 pub struct CinchHttpStorage {
     client: reqwest::Client,
     endpoint: String,
-    token: String,
+    token: Arc<RwLock<String>>,
     internal_database_id: Option<String>,
     /// URL path segment after `/v1/sync/`, e.g. `"pages"` for turbolite page
     /// storage, `"wal"` for walrust WAL frames.
@@ -161,7 +161,7 @@ impl CinchHttpStorage {
         Self {
             client,
             endpoint: endpoint.into().trim_end_matches('/').to_string(),
-            token,
+            token: Arc::new(RwLock::new(token)),
             internal_database_id,
             prefix: prefix.into(),
             fence: None,
@@ -187,6 +187,21 @@ impl CinchHttpStorage {
 
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// Shared Bearer token cell used by long-lived VFS registrations.
+    ///
+    /// SQLite VFS registrations are process-lifetime today, so callers that
+    /// reuse a VFS across credential refreshes need to update the retained
+    /// storage backend instead of registering a new VFS per token.
+    pub fn auth_token_handle(&self) -> Arc<RwLock<String>> {
+        self.token.clone()
+    }
+
+    pub fn update_auth_token(&self, token: impl Into<String>) {
+        if let Ok(mut guard) = self.token.write() {
+            *guard = token.into();
+        }
     }
 
     pub fn prefix(&self) -> &str {
@@ -243,10 +258,9 @@ impl CinchHttpStorage {
 
     /// Add `Authorization: Bearer` header when a non-empty token is configured.
     fn auth(&self, req: RequestBuilder) -> RequestBuilder {
-        if self.token.is_empty() {
-            req
-        } else {
-            req.bearer_auth(&self.token)
+        match self.token.read() {
+            Ok(token) if !token.is_empty() => req.bearer_auth(token.as_str()),
+            _ => req,
         }
     }
 
