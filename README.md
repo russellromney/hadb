@@ -1,6 +1,10 @@
 # hadb: cheap HA embedded databases
 
-> **Experimental.** hadb is under active development and not yet stable. APIs will change without notice.
+> **Experimental / active development.** hadb is useful for exploration and
+> internal integration work, but it is not yet a stable public database
+> substrate. APIs, wire/storage formats, lease/fence behavior, and crate
+> boundaries may change without notice. Treat the README as a current working
+> model, not a compatibility promise.
 
 hadb makes any embedded database highly available via cloud storage, without custom failover/restore logic.
 
@@ -71,19 +75,19 @@ hadb is a workspace of crates:
 **Lease store implementations:**
 - **hadb-lease-s3** — S3 leader election via conditional PUTs (ETags).
 - **hadb-lease-nats** — NATS JetStream KV leader election. 2-5ms operations.
-- **hadb-lease-cinch** — HTTP lease store for Cinch Cinch API integration.
+- **hadb-lease-cinch** — HTTP lease store backend.
 - **hadb-lease-mem** — In-memory lease store for tests.
 
 **Storage backend implementations:**
 - **hadb-storage-s3** — S3 storage backend.
 - **hadb-storage-local** — Local filesystem storage backend.
-- **hadb-storage-cinch** — HTTP storage backend for Cinch Cinch API.
+- **hadb-storage-cinch** — HTTP storage backend.
 - **hadb-storage-mem** — In-memory storage backend for tests.
 
 **Manifest layer (turbodb spec):**
 - **turbodb** — Manifest trait and spec for S3-tiered storage.
 - **turbodb-manifest-s3** — S3 manifest store implementation.
-- **turbodb-manifest-cinch** — HTTP manifest store for Cinch Cinch API.
+- **turbodb-manifest-cinch** — HTTP manifest store backend.
 - **turbodb-manifest-nats** — NATS manifest store.
 - **turbodb-manifest-mem** — In-memory manifest store for tests.
 
@@ -142,19 +146,19 @@ All crates published to [crates.io](https://crates.io/crates/hadb).
 **Lease stores:**
 - [**hadb-lease-s3**](https://github.com/russellromney/hadb/tree/main/hadb-lease-s3) — S3 lease store via conditional PUTs. Works on AWS S3. **Not compatible with Tigris**.
 - [**hadb-lease-nats**](https://github.com/russellromney/hadb/tree/main/hadb-lease-nats) — NATS JetStream KV lease store. 20-50x faster than S3.
-- [**hadb-lease-cinch**](https://github.com/russellromney/hadb/tree/main/hadb-lease-cinch) — HTTP lease store for Cinch Cinch API.
+- [**hadb-lease-cinch**](https://github.com/russellromney/hadb/tree/main/hadb-lease-cinch) — HTTP lease store backend.
 - [**hadb-lease-mem**](https://github.com/russellromney/hadb/tree/main/hadb-lease-mem) — In-memory lease store for tests.
 
 **Storage backends:**
 - [**hadb-storage-s3**](https://github.com/russellromney/hadb/tree/main/hadb-storage-s3) — S3 storage backend.
 - [**hadb-storage-local**](https://github.com/russellromney/hadb/tree/main/hadb-storage-local) — Local filesystem storage backend.
-- [**hadb-storage-cinch**](https://github.com/russellromney/hadb/tree/main/hadb-storage-cinch) — HTTP storage backend for Cinch Cinch API.
+- [**hadb-storage-cinch**](https://github.com/russellromney/hadb/tree/main/hadb-storage-cinch) — HTTP storage backend.
 - [**hadb-storage-mem**](https://github.com/russellromney/hadb/tree/main/hadb-storage-mem) — In-memory storage backend for tests.
 
 **Manifest layer (turbodb):**
 - [**turbodb**](https://github.com/russellromney/hadb/tree/main/turbodb) — Manifest trait and spec.
 - [**turbodb-manifest-s3**](https://github.com/russellromney/hadb/tree/main/turbodb-manifest-s3) — S3 manifest store.
-- [**turbodb-manifest-cinch**](https://github.com/russellromney/hadb/tree/main/turbodb-manifest-cinch) — HTTP manifest store for Cinch Cinch API.
+- [**turbodb-manifest-cinch**](https://github.com/russellromney/hadb/tree/main/turbodb-manifest-cinch) — HTTP manifest store backend.
 - [**turbodb-manifest-nats**](https://github.com/russellromney/hadb/tree/main/turbodb-manifest-nats) — NATS manifest store.
 
 **Database implementations:**
