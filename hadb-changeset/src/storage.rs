@@ -132,6 +132,9 @@ pub async fn discover_after(
             Ok(v) => v,
             Err(_) => continue,
         };
+        if seq <= after_seq {
+            continue;
+        }
         changesets.push(DiscoveredChangeset {
             key: key.clone(),
             seq,
@@ -300,6 +303,61 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].seq, 4);
         assert_eq!(results[1].seq, 5);
+    }
+
+    struct AfterBlindStore<'a>(&'a InMemoryObjectStore);
+
+    #[async_trait::async_trait]
+    impl<'a> StorageBackend for AfterBlindStore<'a> {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.0.get(key).await
+        }
+
+        async fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+            self.0.put(key, data).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.0.delete(key).await
+        }
+
+        async fn list(&self, prefix: &str, _after: Option<&str>) -> Result<Vec<String>> {
+            self.0.list(prefix, None).await
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool> {
+            self.0.exists(key).await
+        }
+
+        async fn put_if_absent(&self, key: &str, data: &[u8]) -> Result<hadb_storage::CasResult> {
+            self.0.put_if_absent(key, data).await
+        }
+
+        async fn put_if_match(
+            &self,
+            key: &str,
+            data: &[u8],
+            etag: &str,
+        ) -> Result<hadb_storage::CasResult> {
+            self.0.put_if_match(key, data, etag).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_filters_stale_keys_when_backend_after_is_advisory() {
+        let store = InMemoryObjectStore::new();
+        for seq in 1..=5 {
+            upload_physical(&store, "test/", "mydb", &make_cs(seq, 0))
+                .await
+                .unwrap();
+        }
+
+        let blind = AfterBlindStore(&store);
+        let results = discover_after(&blind, "test/", "mydb", 3, ChangesetKind::Physical)
+            .await
+            .unwrap();
+        let seqs: Vec<_> = results.iter().map(|result| result.seq).collect();
+        assert_eq!(seqs, vec![4, 5]);
     }
 
     #[tokio::test]
