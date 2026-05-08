@@ -322,7 +322,6 @@ impl StorageBackend for S3Storage {
         let full = self.full_key(key);
         let len = data.len() as u64;
         let mut attempt = 0u32;
-        let mut tried_fallback = false;
         loop {
             let body = ByteStream::from(data.to_vec());
             match self
@@ -349,8 +348,7 @@ impl StorageBackend for S3Storage {
                         etag: None,
                     })
                 }
-                Err(e) if !tried_fallback => {
-                    tried_fallback = true;
+                Err(e) if attempt == 0 => {
                     tracing::debug!(
                         "S3 PUT-if-absent {full} failed with {e}; trying HEAD+PUT fallback for S3-compatible stores"
                     );
