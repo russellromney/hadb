@@ -1,4 +1,6 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use std::collections::HashSet;
+
 use hadb_storage::StorageBackend;
 
 use crate::physical::{self, PhysicalChangeset};
@@ -30,6 +32,21 @@ pub struct DiscoveredChangeset {
     pub key: String,
     pub seq: u64,
     pub kind: ChangesetKind,
+}
+
+/// Authoritative base for strict live physical chain discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrictChainBase {
+    pub seq: u64,
+    pub checksum: u64,
+}
+
+/// Validated head of a strict live physical chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrictChainHead {
+    pub seq: u64,
+    pub checksum: u64,
+    pub count: usize,
 }
 
 /// Format an S3 key for a changeset.
@@ -144,6 +161,82 @@ pub async fn discover_after(
 
     changesets.sort_by_key(|c| c.seq);
     Ok(changesets)
+}
+
+/// Discover and validate the live physical changeset chain after `base`.
+///
+/// This is the strict protocol helper for consumers whose base state is owned
+/// externally (for example Turbolite). It treats the base plus live generation
+/// `.hadbp` objects as the authority:
+///
+/// - only generation `0000` physical changesets are considered,
+/// - the first seq after the base must be `base.seq + 1`,
+/// - every later seq must be contiguous,
+/// - duplicate listed seqs fail closed,
+/// - key seq must match header seq,
+/// - every changeset must chain from the prior checksum.
+pub async fn discover_strict_physical_chain(
+    storage: &dyn StorageBackend,
+    prefix: &str,
+    db_name: &str,
+    base: StrictChainBase,
+) -> Result<StrictChainHead> {
+    let files = discover_after(storage, prefix, db_name, base.seq, ChangesetKind::Physical).await?;
+
+    let mut seen = HashSet::new();
+    let mut expected_seq = base.seq + 1;
+    let mut expected_checksum = base.checksum;
+    let mut count = 0usize;
+
+    for file in files {
+        if !seen.insert(file.seq) {
+            return Err(anyhow!(
+                "{}: duplicate live physical changeset seq {} at {}",
+                db_name,
+                file.seq,
+                file.key
+            ));
+        }
+        if file.seq != expected_seq {
+            return Err(anyhow!(
+                "{}: non-contiguous live physical changeset sequence: expected {}, found {} at {}",
+                db_name,
+                expected_seq,
+                file.seq,
+                file.key
+            ));
+        }
+
+        let changeset = download_physical(storage, &file.key).await?;
+        if changeset.header.seq != file.seq {
+            return Err(anyhow!(
+                "{}: changeset key/header seq mismatch at {}: key {}, header {}",
+                db_name,
+                file.key,
+                file.seq,
+                changeset.header.seq
+            ));
+        }
+        physical::verify_chain(expected_checksum, &changeset).map_err(|e| {
+            anyhow!(
+                "{}: checksum chain break at seq {} ({}): {}",
+                db_name,
+                file.seq,
+                file.key,
+                e
+            )
+        })?;
+
+        expected_checksum = changeset.checksum;
+        expected_seq += 1;
+        count += 1;
+    }
+
+    Ok(StrictChainHead {
+        seq: expected_seq - 1,
+        checksum: expected_checksum,
+        count,
+    })
 }
 
 /// Discover the latest snapshot changeset (if any).
@@ -303,6 +396,180 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].seq, 4);
         assert_eq!(results[1].seq, 5);
+    }
+
+    #[tokio::test]
+    async fn strict_physical_chain_empty_returns_base() {
+        let store = InMemoryObjectStore::new();
+        let head = discover_strict_physical_chain(
+            &store,
+            "test/",
+            "mydb",
+            StrictChainBase {
+                seq: 7,
+                checksum: 42,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            head,
+            StrictChainHead {
+                seq: 7,
+                checksum: 42,
+                count: 0,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_physical_chain_validates_contiguous_checksum_chain() {
+        let store = InMemoryObjectStore::new();
+        let base = StrictChainBase {
+            seq: 10,
+            checksum: 111,
+        };
+        let cs11 = make_cs(11, base.checksum);
+        let cs12 = make_cs(12, cs11.checksum);
+        upload_physical(&store, "test/", "mydb", &cs11)
+            .await
+            .unwrap();
+        upload_physical(&store, "test/", "mydb", &cs12)
+            .await
+            .unwrap();
+
+        let head = discover_strict_physical_chain(&store, "test/", "mydb", base)
+            .await
+            .unwrap();
+        assert_eq!(
+            head,
+            StrictChainHead {
+                seq: 12,
+                checksum: cs12.checksum,
+                count: 2,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_physical_chain_rejects_gap() {
+        let store = InMemoryObjectStore::new();
+        let base = StrictChainBase {
+            seq: 10,
+            checksum: 111,
+        };
+        upload_physical(&store, "test/", "mydb", &make_cs(12, base.checksum))
+            .await
+            .unwrap();
+
+        let err = discover_strict_physical_chain(&store, "test/", "mydb", base)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-contiguous"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn strict_physical_chain_rejects_wrong_prev_checksum() {
+        let store = InMemoryObjectStore::new();
+        let base = StrictChainBase {
+            seq: 10,
+            checksum: 111,
+        };
+        upload_physical(&store, "test/", "mydb", &make_cs(11, 999))
+            .await
+            .unwrap();
+
+        let err = discover_strict_physical_chain(&store, "test/", "mydb", base)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("checksum chain break"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn strict_physical_chain_rejects_key_header_seq_mismatch() {
+        let store = InMemoryObjectStore::new();
+        let base = StrictChainBase {
+            seq: 10,
+            checksum: 111,
+        };
+        let wrong = make_cs(99, base.checksum);
+        let key = format_key(
+            "test/",
+            "mydb",
+            GENERATION_INCREMENTAL,
+            11,
+            ChangesetKind::Physical,
+        );
+        store.put(&key, &physical::encode(&wrong)).await.unwrap();
+
+        let err = discover_strict_physical_chain(&store, "test/", "mydb", base)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("key/header seq mismatch"), "{err}");
+    }
+
+    struct DuplicateListingStore<'a>(&'a InMemoryObjectStore);
+
+    #[async_trait::async_trait]
+    impl<'a> StorageBackend for DuplicateListingStore<'a> {
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.0.get(key).await
+        }
+
+        async fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+            self.0.put(key, data).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.0.delete(key).await
+        }
+
+        async fn list(&self, prefix: &str, after: Option<&str>) -> Result<Vec<String>> {
+            let mut keys = self.0.list(prefix, after).await?;
+            if let Some(first) = keys.first().cloned() {
+                keys.insert(0, first);
+            }
+            Ok(keys)
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool> {
+            self.0.exists(key).await
+        }
+
+        async fn put_if_absent(&self, key: &str, data: &[u8]) -> Result<hadb_storage::CasResult> {
+            self.0.put_if_absent(key, data).await
+        }
+
+        async fn put_if_match(
+            &self,
+            key: &str,
+            data: &[u8],
+            etag: &str,
+        ) -> Result<hadb_storage::CasResult> {
+            self.0.put_if_match(key, data, etag).await
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_physical_chain_rejects_duplicate_listed_seq() {
+        let store = InMemoryObjectStore::new();
+        let base = StrictChainBase {
+            seq: 10,
+            checksum: 111,
+        };
+        upload_physical(&store, "test/", "mydb", &make_cs(11, base.checksum))
+            .await
+            .unwrap();
+        let duplicate = DuplicateListingStore(&store);
+
+        let err = discover_strict_physical_chain(&duplicate, "test/", "mydb", base)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate"), "{err}");
     }
 
     struct AfterBlindStore<'a>(&'a InMemoryObjectStore);
