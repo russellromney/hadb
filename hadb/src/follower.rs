@@ -240,9 +240,8 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                                 }
                             }
 
-                            // 3. Resume leader sync, continuing from existing S3 seq.
-                            // add_continuing() loads state.json to get the right seq
-                            // so followers can discover new changesets.
+                            // 3. Resume leader sync from the replicator's authoritative
+                            // durable cursor so followers can discover new changesets.
                             let add_result = tokio::time::timeout(
                                 ctx.replicator_timeout,
                                 ctx.replicator.add_continuing(&ctx.db_name, &ctx.db_path),
