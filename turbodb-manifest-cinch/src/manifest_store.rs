@@ -19,7 +19,7 @@
 //!       → 404 (no manifest)
 //! ```
 //!
-//! PUT matches the verb used by the rest of grabby's sync API
+//! PUT matches the verb used by the rest of the cinch sync API
 //! (`/v1/sync/wal/{segment}`, `/v1/sync/snapshot`) for idempotent
 //! writes; the query-string key names the resource.
 //!
@@ -29,7 +29,7 @@
 //! Phase Turbogenesis-b: switched from JSON to msgpack. The
 //! pre-Turbogenesis-b client wrapped the manifest in
 //! `{ manifest, expected_version }` and sent JSON — which also happened
-//! to be incompatible with grabby's /v1/sync/manifest server (it used
+//! to be incompatible with the cinch /v1/sync/manifest server (it used
 //! an If-Match header but the client never set one). The whole path
 //! was effectively vestigial. Now both sides speak the same msgpack
 //! wire.
@@ -65,7 +65,7 @@ pub struct CinchManifestStore {
 impl CinchManifestStore {
     /// Create a new Cinch manifest store.
     ///
-    /// - `endpoint`: Base URL (e.g. `https://grabby.example.com`).
+    /// - `endpoint`: Base URL (e.g. `https://cinch.example.com`).
     /// - `token`: Bearer token for authentication.
     pub fn new(endpoint: &str, token: &str) -> Self {
         let client = reqwest::Client::builder()
@@ -82,7 +82,7 @@ impl CinchManifestStore {
         }
     }
 
-    /// Create a store for grabby's internal NoAuth listener. Requests carry
+    /// Create a store for the cinch internal NoAuth listener. Requests carry
     /// the system database id as `?database_id=...` and omit Bearer auth.
     pub fn new_internal(endpoint: &str, database_id: &str) -> Self {
         let client = reqwest::Client::builder()
@@ -344,10 +344,11 @@ impl ManifestStore for CinchManifestStore {
 
 #[cfg(test)]
 mod tests {
-    //! The mock server here intentionally mirrors the real grabby
-    //! handlers' behavior (msgpack in, msgpack out, `If-Match` for
-    //! CAS) so that this test is a meaningful wire-contract check —
-    //! not a self-fulfilling "client talks to a client-shaped mock."
+    //! The mock server here intentionally mirrors the real cinch
+    //! manifest-server handlers' behavior (msgpack in, msgpack out,
+    //! `If-Match` for CAS) so that this test is a meaningful
+    //! wire-contract check — not a self-fulfilling "client talks to a
+    //! client-shaped mock."
 
     use super::*;
     use axum::{
@@ -464,11 +465,11 @@ mod tests {
 
         let mut store = state.store.lock().await;
 
-        // Epoch fence — mirrors the grabby server contract (and the
-        // mem/s3 stores): a write whose epoch is below the stored
-        // epoch is fenced. Surfaced as 409 GONE-equivalent; the client
-        // maps the matching real-server status to LeaseFenceError. Here
-        // we use 422 UNPROCESSABLE_ENTITY as the fence signal so it is
+        // Epoch fence — mirrors the manifest server's epoch-fence
+        // contract (and the mem/s3 stores): a write whose epoch is below
+        // the stored epoch is fenced. The client maps the matching
+        // server status to LeaseFenceError. Here we use 422
+        // UNPROCESSABLE_ENTITY as the fence signal so it is
         // distinct from the 409 version-CAS conflict.
         if let Some(existing) = store.get(&params.key) {
             if incoming.epoch < existing.epoch {

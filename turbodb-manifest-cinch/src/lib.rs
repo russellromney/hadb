@@ -9,7 +9,7 @@
 //! ```ignore
 //! use turbodb_manifest_cinch::CinchManifestStore;
 //!
-//! let store = CinchManifestStore::new("https://grabby.example.com", "my-token");
+//! let store = CinchManifestStore::new("https://cinch.example.com", "my-token");
 //! ```
 
 pub mod manifest_store;
