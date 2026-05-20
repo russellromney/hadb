@@ -169,7 +169,22 @@ impl ManifestStore for RedisManifestStore {
                 success: true,
                 etag: Some(new_version.to_string()),
             }),
-            "EXISTS" | "CONFLICT" | "MISSING" => Ok(CasResult {
+            "CONFLICT" => {
+                // The version-CAS lost the race. Re-read and convert a
+                // stale-epoch loser into a typed LeaseFenceError (consistent
+                // with the mem backend), so a writer that lost its lease
+                // detects it on the first conflict rather than only on a
+                // later retry. A same-epoch loser is a genuine version race
+                // (success:false, retryable).
+                if let Some(existing) = self.get(key).await? {
+                    check_epoch_fence(existing.epoch, manifest.epoch)?;
+                }
+                Ok(CasResult {
+                    success: false,
+                    etag: None,
+                })
+            }
+            "EXISTS" | "MISSING" => Ok(CasResult {
                 success: false,
                 etag: None,
             }),

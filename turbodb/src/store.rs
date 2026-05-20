@@ -21,6 +21,13 @@ use crate::types::{LeaseFenceError, Manifest, ManifestMeta};
 /// Equal epochs are allowed through to version-CAS — that's the normal
 /// case where the same leader publishes successive versions within one
 /// lease term.
+///
+/// INVARIANT: epoch must be strictly monotonic across leadership changes
+/// (each new lease term gets a higher epoch). This is what makes the
+/// equal-epoch allowance safe — equal epoch implies the *same* leader. If
+/// epoch were ever assigned non-uniquely (e.g. wall-clock derived), two
+/// distinct writers could share one and both pass the fence, leaving
+/// version-CAS as the only separator. Lease assignment must guarantee this.
 pub fn check_epoch_fence(stored_epoch: u64, attempted_epoch: u64) -> Result<()> {
     if attempted_epoch < stored_epoch {
         return Err(LeaseFenceError {
