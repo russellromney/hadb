@@ -1,7 +1,7 @@
 //! `hadb-storage-cinch`: Cinch-protocol HTTP `StorageBackend`.
 //!
-//! Speaks the `/v1/sync/{prefix}/` routes that Cinch's Grabby (and engine
-//! in embedded mode) exposes:
+//! Speaks the `/v1/sync/{prefix}/` routes that the cinch sync server
+//! exposes:
 //!
 //! ```text
 //! GET    /v1/sync/{prefix}/{key}                 -> body
@@ -109,7 +109,7 @@ impl CinchHttpStorage {
         Self::with_client(client, endpoint, token, prefix)
     }
 
-    /// Construct a client for grabby's internal NoAuth listener. Requests carry
+    /// Construct a client for the cinch internal NoAuth listener. Requests carry
     /// the system database id as `?database_id=...` and intentionally skip
     /// Bearer auth.
     pub fn new_internal(
@@ -295,8 +295,8 @@ impl CinchHttpStorage {
     /// response returns to `DbLease::renew` and it calls
     /// `update_fence_token()` — a ~ms window where the local atomic
     /// is stale but NATS-KV has advanced. A concurrent turbolite
-    /// page write inside that window sends the stale fence, grabby
-    /// returns 412, turbolite surfaces it as SQLite `disk I/O error`,
+    /// page write inside that window sends the stale fence, the cinch
+    /// server returns 412, turbolite surfaces it as SQLite `disk I/O error`,
     /// and `migrate()` during provision blows up.
     ///
     /// So for unconditional writes, treat 412 as transient: the loop

@@ -1,8 +1,8 @@
 //! CinchLeaseStore: LeaseStore implementation over the Cinch HTTP lease
 //! protocol.
 //!
-//! Translates CAS lease operations to HTTP requests against Grabby's (or
-//! engine's embedded) /v1/lease routes.
+//! Translates CAS lease operations to HTTP requests against the cinch
+//! sync server's /v1/lease routes.
 //!
 //! HTTP API contract:
 //!   POST   /v1/lease?key=...  -> 201 { fence }              (acquire, 409 if taken)
@@ -82,7 +82,7 @@ impl CinchLeaseStore {
         }
     }
 
-    /// Create a lease store for grabby's internal NoAuth listener.
+    /// Create a lease store for the cinch internal NoAuth listener.
     ///
     /// `database_id` is carried on every request as a URL-encoded query
     /// parameter (`?database_id=...`); no Bearer token is sent. Used for
@@ -666,7 +666,7 @@ mod tests {
     #[test]
     fn test_internal_url_includes_database_id() {
         let store =
-            CinchLeaseStore::new_internal("http://grabby.internal:8010", "_system/placement-db");
+            CinchLeaseStore::new_internal("http://cinch.internal:8010", "_system/placement-db");
         let url = store.lease_url("writer");
         assert!(url.contains("key=writer"), "url missing key: {}", url);
         assert!(
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn test_public_url_omits_database_id() {
-        let store = CinchLeaseStore::new("http://grabby.example.com", "tok");
+        let store = CinchLeaseStore::new("http://cinch.example.com", "tok");
         let url = store.lease_url("writer");
         assert!(url.contains("key=writer"));
         assert!(
@@ -693,7 +693,7 @@ mod tests {
         // Empty token → auth() does not set Bearer header (existing
         // behavior pinned for the internal-mode contract).
         let store =
-            CinchLeaseStore::new_internal("http://grabby.internal:8010", "_system/token-db");
+            CinchLeaseStore::new_internal("http://cinch.internal:8010", "_system/token-db");
         assert!(store.token.is_empty());
         assert!(store.internal_database_id.is_some());
     }

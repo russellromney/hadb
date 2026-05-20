@@ -1,8 +1,8 @@
 //! `hadb-lease-cinch`: Cinch-protocol HTTP lease store for hadb.
 //!
 //! Implements the `LeaseStore` trait over HTTP, speaking the `/v1/lease`
-//! routes exposed by Grabby (and engine in embedded mode) with Bearer
-//! token auth. CAS semantics use standard HTTP conditional headers
+//! routes the cinch sync server exposes, with Bearer token auth. CAS
+//! semantics use standard HTTP conditional headers
 //! (If-Match, If-None-Match).
 //!
 //! Also exports `AtomicFence`/`AtomicFenceWriter`, the concrete
@@ -17,7 +17,7 @@
 //!
 //! // Internal mode: no auth, database_id on the wire. For system DBs.
 //! let system_store = CinchLeaseStore::new_internal(
-//!     "http://grabby.internal:8010",
+//!     "http://cinch.internal:8010",
 //!     "_system/placement-db",
 //! );
 //!
