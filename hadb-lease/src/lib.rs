@@ -52,11 +52,78 @@ pub struct LeaseData {
     pub sleeping: bool,
 }
 
+/// Clock-skew safety margin (seconds) separating "holder still trusts the
+/// lease" from "another node may claim it". Two independent clocks at a
+/// single TTL boundary can both believe they own the lease; a margin on
+/// each side opens a `2 * margin` dead zone where neither node acts,
+/// removing the overlap. Conservative default; tune per deployment skew.
+pub const LEASE_SKEW_MARGIN_SECS: u64 = 2;
+
 impl LeaseData {
-    /// Whether this lease has expired based on current time.
+    /// Plain TTL midpoint: `now >= claimed_at + ttl_secs`. NO skew margin.
+    ///
+    /// Use ONLY for read-side discovery where the caller is not contending
+    /// for the lease (e.g. a client deciding whether a leader address is
+    /// fresh). Contending call-sites MUST use the margined methods below:
+    /// the holder uses [`should_relinquish`](Self::should_relinquish), a
+    /// would-be claimer uses
+    /// [`is_claimable_by_other`](Self::is_claimable_by_other).
     pub fn is_expired(&self) -> bool {
-        let now = chrono::Utc::now().timestamp() as u64;
-        now >= self.claimed_at + self.ttl_secs
+        self.is_expired_at(now_secs())
+    }
+
+    /// [`is_expired`](Self::is_expired) with an injected clock (for tests).
+    pub fn is_expired_at(&self, now: u64) -> bool {
+        now >= self.claimed_at.saturating_add(self.ttl_secs)
+    }
+
+    /// Holder-side self-trust check: the lease holder should stop trusting
+    /// its lease (relinquish / stop issuing fenced writes) once
+    /// `now >= claimed_at + ttl_secs - margin`. Firing the holder EARLY
+    /// (before the bare TTL) guarantees it fences itself before any
+    /// claimer's window opens.
+    pub fn should_relinquish(&self) -> bool {
+        self.should_relinquish_at(now_secs())
+    }
+
+    /// [`should_relinquish`](Self::should_relinquish) with an injected clock.
+    pub fn should_relinquish_at(&self, now: u64) -> bool {
+        let deadline = self
+            .claimed_at
+            .saturating_add(self.ttl_secs)
+            .saturating_sub(LEASE_SKEW_MARGIN_SECS);
+        now >= deadline
+    }
+
+    /// Claimer-side takeover check: a DIFFERENT node may take this lease
+    /// over only once `now >= claimed_at + ttl_secs + margin`. This
+    /// requires strictly MORE elapsed time than the holder trusts
+    /// ([`should_relinquish`](Self::should_relinquish)), so the holder has
+    /// always self-fenced before a claimer acts — no split-brain at the
+    /// boundary.
+    pub fn is_claimable_by_other(&self) -> bool {
+        self.is_claimable_by_other_at(now_secs())
+    }
+
+    /// [`is_claimable_by_other`](Self::is_claimable_by_other) with an
+    /// injected clock (for tests).
+    pub fn is_claimable_by_other_at(&self, now: u64) -> bool {
+        let deadline = self
+            .claimed_at
+            .saturating_add(self.ttl_secs)
+            .saturating_add(LEASE_SKEW_MARGIN_SECS);
+        now >= deadline
+    }
+}
+
+/// Current wall-clock in whole seconds. Clamped at 0 for pre-epoch clocks
+/// so the `u64` lease arithmetic never wraps.
+fn now_secs() -> u64 {
+    let ts = chrono::Utc::now().timestamp();
+    if ts < 0 {
+        0
+    } else {
+        ts as u64
     }
 }
 
@@ -149,6 +216,80 @@ mod tests {
             sleeping: false,
         };
         assert!(lease.is_expired());
+    }
+
+    // ── Skew-window safety (Finding 1) ──────────────────────────────
+    //
+    // The invariant: a claimer must NOT consider the lease takeable until
+    // strictly more than `margin` past TTL, while the holder relinquishes
+    // `margin` BEFORE TTL. That leaves a `2 * margin` dead zone with no
+    // overlap, so two clocks can never both act as owner at the boundary.
+
+    fn fixed_lease(claimed_at: u64, ttl: u64) -> LeaseData {
+        LeaseData {
+            instance_id: "holder".into(),
+            address: "addr".into(),
+            claimed_at,
+            ttl_secs: ttl,
+            session_id: "s".into(),
+            sleeping: false,
+        }
+    }
+
+    #[test]
+    fn is_claimable_by_other_requires_margin_past_ttl() {
+        let ttl = 30;
+        let lease = fixed_lease(1_000, ttl);
+        let ttl_boundary = 1_000 + ttl;
+
+        // At the bare TTL boundary the lease is "expired" by the midpoint
+        // rule but NOT yet claimable by another node.
+        assert!(lease.is_expired_at(ttl_boundary));
+        assert!(!lease.is_claimable_by_other_at(ttl_boundary));
+
+        // Still not claimable just before margin elapses.
+        assert!(!lease.is_claimable_by_other_at(ttl_boundary + LEASE_SKEW_MARGIN_SECS - 1));
+
+        // Claimable only at TTL + margin.
+        assert!(lease.is_claimable_by_other_at(ttl_boundary + LEASE_SKEW_MARGIN_SECS));
+    }
+
+    #[test]
+    fn holder_relinquishes_before_claimer_can_take() {
+        let ttl = 30;
+        let lease = fixed_lease(1_000, ttl);
+        let ttl_boundary = 1_000 + ttl;
+
+        // Holder self-relinquishes `margin` BEFORE the bare TTL.
+        assert!(!lease.should_relinquish_at(ttl_boundary - LEASE_SKEW_MARGIN_SECS - 1));
+        assert!(lease.should_relinquish_at(ttl_boundary - LEASE_SKEW_MARGIN_SECS));
+
+        // At that same instant the lease is nowhere near claimable.
+        assert!(!lease.is_claimable_by_other_at(ttl_boundary - LEASE_SKEW_MARGIN_SECS));
+    }
+
+    #[test]
+    fn skew_dead_zone_no_overlap() {
+        let ttl = 30;
+        let lease = fixed_lease(0, ttl);
+        let relinquish_at = ttl - LEASE_SKEW_MARGIN_SECS;
+        let claimable_at = ttl + LEASE_SKEW_MARGIN_SECS;
+
+        // For every instant in [relinquish, claimable) the holder has let
+        // go but no claimer may take over — the dead zone. Crucially the
+        // claimer is never permitted while the holder still trusts the
+        // lease.
+        for now in relinquish_at..claimable_at {
+            assert!(
+                lease.should_relinquish_at(now),
+                "holder must have relinquished at {now}"
+            );
+            assert!(
+                !lease.is_claimable_by_other_at(now),
+                "claimer must NOT take over at {now}"
+            );
+        }
+        assert!(lease.is_claimable_by_other_at(claimable_at));
     }
 
     #[test]

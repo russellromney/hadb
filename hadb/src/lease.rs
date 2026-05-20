@@ -30,6 +30,12 @@ pub struct DbLease {
     /// reader that storage adapters hold. `None` = no external observer
     /// (tests and single-writer deployments that don't fence).
     fence_writer: Option<Arc<AtomicFenceWriter>>,
+    /// Wall-clock second at which the lease we currently hold was stamped
+    /// (`claimed_at` of the last successful claim/renew/sleeping write).
+    /// `None` when we hold no lease. Used to compute the proactive
+    /// self-fence deadline so a partitioned leader relinquishes before
+    /// TTL even when renewals are erroring rather than CAS-conflicting.
+    current_claimed_at: Option<u64>,
 }
 
 impl DbLease {
@@ -54,6 +60,7 @@ impl DbLease {
             current_etag: None,
             session_id: uuid::Uuid::new_v4().to_string(),
             fence_writer: None,
+            current_claimed_at: None,
         }
     }
 
@@ -120,8 +127,12 @@ impl DbLease {
                         true => Ok(Role::Leader),
                         false => Ok(Role::Follower),
                     }
-                } else if lease.is_expired() {
-                    // Expired lease by another instance — try to take over.
+                } else if lease.is_claimable_by_other() {
+                    // Another instance's lease is expired PAST the skew
+                    // margin — only then is it safe to take over. Using the
+                    // margined claimer check (not bare is_expired) keeps the
+                    // holder's self-relinquish window strictly ahead of ours,
+                    // so we never contend at the TTL boundary.
                     self.session_id = uuid::Uuid::new_v4().to_string();
                     self.try_claim_expired(&etag).await
                 } else {
@@ -141,7 +152,9 @@ impl DbLease {
             .ok_or_else(|| anyhow!("No ETag — cannot renew without prior claim"))?
             .clone();
 
-        let body = serde_json::to_vec(&self.make_lease())?;
+        let lease = self.make_lease();
+        let claimed_at = lease.claimed_at;
+        let body = serde_json::to_vec(&lease)?;
         let result = self
             .store
             .write_if_match(&self.lease_key, body, &etag)
@@ -149,6 +162,7 @@ impl DbLease {
 
         if result.success {
             self.current_etag = result.etag;
+            self.current_claimed_at = Some(claimed_at);
             self.update_fence_token();
             Ok(true)
         } else {
@@ -157,26 +171,69 @@ impl DbLease {
     }
 
     async fn recover_ambiguous_renewal_conflict(&mut self) -> Result<bool> {
+        // The etag we believed we held going INTO the renewal. A genuine
+        // "our commit landed but the response was lost" recovery must show
+        // the store moved to a NEW etag that advanced consistently from
+        // this one. Reusing the same etag, or one that regressed, means we
+        // are looking at a stale read of a lease we have actually lost.
+        let prior_etag = self.current_etag.clone();
+
         match self.read().await? {
             Some((lease, etag))
                 if lease.instance_id == self.instance_id
                     && lease.session_id == self.session_id
                     && !lease.sleeping
-                    && !lease.is_expired() =>
+                    && !lease.should_relinquish()
+                    && Self::etag_advanced_consistently(prior_etag.as_deref(), &etag) =>
             {
                 tracing::warn!(
-                    "Lease renewal CAS conflict matched our current session on read-back — \
-                     treating prior ambiguous renewal as accepted"
+                    "Lease renewal CAS conflict matched our current session on read-back \
+                     with an advanced etag — treating prior ambiguous renewal as accepted"
                 );
                 self.current_etag = Some(etag);
+                self.current_claimed_at = Some(lease.claimed_at);
                 self.update_fence_token();
                 Ok(true)
             }
             _ => {
-                tracing::warn!("Lease renewal failed (ETag mismatch) — lost lease");
+                tracing::warn!(
+                    "Lease renewal failed (ETag mismatch / unexpected read-back) — lost lease"
+                );
                 self.current_etag = None;
+                self.current_claimed_at = None;
                 self.clear_fence_token();
                 Ok(false)
+            }
+        }
+    }
+
+    /// Did the read-back etag advance consistently from the one we held?
+    ///
+    /// A real ambiguous-commit recovery sees a NEW etag (the store applied
+    /// our write) that did not regress. We require:
+    /// - the read-back differs from our prior etag (equal == the store
+    ///   never moved == we are reading a stale lease we lost), and
+    /// - when both parse as `u64` revisions, the read-back is strictly
+    ///   greater (a numeric regression means another writer's older
+    ///   revision — lost leadership).
+    ///
+    /// Opaque (non-`u64`) etags can only be checked for inequality; that
+    /// is the strongest signal those backends give. (Such backends should
+    /// not attach a fence_writer — see `update_fence_token`.)
+    fn etag_advanced_consistently(prior: Option<&str>, read_back: &str) -> bool {
+        match prior {
+            // No prior etag: we never held the lease, so a CAS conflict
+            // here cannot be "our commit landed". Treat as lost.
+            None => false,
+            Some(prior) => {
+                if prior == read_back {
+                    return false;
+                }
+                match (prior.parse::<u64>(), read_back.parse::<u64>()) {
+                    (Ok(prev), Ok(now)) => now > prev,
+                    // Opaque etags: inequality is all we can verify.
+                    _ => true,
+                }
             }
         }
     }
@@ -185,6 +242,7 @@ impl DbLease {
     pub async fn release(&mut self) -> Result<()> {
         self.store.delete(&self.lease_key).await?;
         self.current_etag = None;
+        self.current_claimed_at = None;
         self.clear_fence_token();
         Ok(())
     }
@@ -228,7 +286,9 @@ impl DbLease {
     async fn try_claim_new(&mut self) -> Result<Role> {
         self.session_id = uuid::Uuid::new_v4().to_string();
 
-        let body = serde_json::to_vec(&self.make_lease())?;
+        let lease = self.make_lease();
+        let claimed_at = lease.claimed_at;
+        let body = serde_json::to_vec(&lease)?;
         let result = self
             .store
             .write_if_not_exists(&self.lease_key, body)
@@ -236,6 +296,7 @@ impl DbLease {
 
         if result.success {
             self.current_etag = result.etag;
+            self.current_claimed_at = Some(claimed_at);
             self.update_fence_token();
             Ok(Role::Leader)
         } else {
@@ -245,7 +306,9 @@ impl DbLease {
 
     /// Try to take over an expired lease (CAS on the old etag).
     async fn try_claim_expired(&mut self, expired_etag: &str) -> Result<Role> {
-        let body = serde_json::to_vec(&self.make_lease())?;
+        let lease = self.make_lease();
+        let claimed_at = lease.claimed_at;
+        let body = serde_json::to_vec(&lease)?;
         let result = self
             .store
             .write_if_match(&self.lease_key, body, expired_etag)
@@ -253,6 +316,7 @@ impl DbLease {
 
         if result.success {
             self.current_etag = result.etag;
+            self.current_claimed_at = Some(claimed_at);
             self.update_fence_token();
             Ok(Role::Leader)
         } else {
@@ -269,10 +333,11 @@ impl DbLease {
             .ok_or_else(|| anyhow!("No ETag — cannot set sleeping without prior claim"))?
             .clone();
 
+        let claimed_at = chrono::Utc::now().timestamp() as u64;
         let lease = LeaseData {
             instance_id: self.instance_id.clone(),
             address: self.address.clone(),
-            claimed_at: chrono::Utc::now().timestamp() as u64,
+            claimed_at,
             ttl_secs: self.ttl_secs,
             session_id: self.session_id.clone(),
             sleeping: true,
@@ -285,11 +350,13 @@ impl DbLease {
 
         if result.success {
             self.current_etag = result.etag;
+            self.current_claimed_at = Some(claimed_at);
             self.update_fence_token();
             Ok(true)
         } else {
             tracing::warn!("set_sleeping CAS conflict — lost lease");
             self.current_etag = None;
+            self.current_claimed_at = None;
             self.clear_fence_token();
             Ok(false)
         }
@@ -304,6 +371,44 @@ impl DbLease {
             session_id: self.session_id.clone(),
             sleeping: false,
         }
+    }
+
+    /// Proactive self-fence deadline: the wall-clock second past which the
+    /// holder must stop trusting its lease (`claimed_at + ttl - margin`).
+    /// `None` when we hold no lease. The renewal loop fences itself once
+    /// `now_secs() >= renew_deadline_secs()`, INDEPENDENT of the
+    /// consecutive-error count — a partitioned leader whose renewals only
+    /// ever error still relinquishes before TTL, before any follower's
+    /// claim window opens.
+    pub fn renew_deadline_secs(&self) -> Option<u64> {
+        self.current_claimed_at.map(|claimed_at| {
+            claimed_at
+                .saturating_add(self.ttl_secs)
+                .saturating_sub(hadb_lease::LEASE_SKEW_MARGIN_SECS)
+        })
+    }
+
+    /// Whether the holder should self-relinquish NOW (proactive fence).
+    /// True once past [`renew_deadline_secs`](Self::renew_deadline_secs);
+    /// always false when we hold no lease.
+    pub fn should_self_fence(&self) -> bool {
+        self.should_self_fence_at(now_secs())
+    }
+
+    /// [`should_self_fence`](Self::should_self_fence) with an injected clock.
+    pub fn should_self_fence_at(&self, now: u64) -> bool {
+        matches!(self.renew_deadline_secs(), Some(deadline) if now >= deadline)
+    }
+}
+
+/// Current wall-clock in whole seconds, clamped at 0 (mirrors the helper in
+/// `hadb-lease`; kept local to avoid widening that crate's public surface).
+fn now_secs() -> u64 {
+    let ts = chrono::Utc::now().timestamp();
+    if ts < 0 {
+        0
+    } else {
+        ts as u64
     }
 }
 
@@ -646,6 +751,95 @@ mod tests {
         let result = lease.renew().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No ETag"));
+    }
+
+    /// Finding 3: a store that reports a CAS conflict on `write_if_match`
+    /// but leaves the stored lease UNTOUCHED (same etag as the one we held).
+    /// Models a non-atomic / read-after-write-lagging backend where the
+    /// read-back still carries our identity from a stale view even though
+    /// we have actually lost the lease.
+    struct ConflictWithoutAdvanceStore {
+        inner: MockLeaseStore,
+    }
+    impl ConflictWithoutAdvanceStore {
+        fn new() -> Self {
+            Self {
+                inner: MockLeaseStore::new(),
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl LeaseStore for ConflictWithoutAdvanceStore {
+        async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
+            self.inner.read(key).await
+        }
+        async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult> {
+            self.inner.write_if_not_exists(key, data).await
+        }
+        async fn write_if_match(
+            &self,
+            _key: &str,
+            _data: Vec<u8>,
+            _etag: &str,
+        ) -> Result<CasResult> {
+            // Always report conflict, never mutate the store. Read-back will
+            // show our identity + the SAME etag we already held.
+            Ok(CasResult {
+                success: false,
+                etag: None,
+            })
+        }
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key).await
+        }
+    }
+
+    #[tokio::test]
+    async fn recover_rejects_unexpected_etag() {
+        let store = Arc::new(ConflictWithoutAdvanceStore::new());
+        let (fence, writer) = AtomicFence::new();
+        let mut lease = DbLease::new(store, "db1/_lease.json", "inst-1", "addr-1", 60)
+            .with_fence_writer(Arc::new(writer));
+
+        // Claim succeeds (write_if_not_exists path).
+        assert_eq!(lease.try_claim().await.unwrap(), Role::Leader);
+        assert!(lease.has_etag());
+        assert!(fence.current().is_some(), "fence set after claim");
+
+        // Renew CAS-conflicts and the read-back shows our identity but the
+        // SAME etag we already held (no consistent advance) — recovery must
+        // treat this as LOST leadership, not falsely re-confirm.
+        let renewed = lease.renew().await.unwrap();
+        assert!(
+            !renewed,
+            "read-back with a non-advanced etag must be treated as lost leadership"
+        );
+        assert!(!lease.has_etag(), "etag must be cleared on lost leadership");
+        assert!(
+            fence.current().is_none(),
+            "fence must be cleared so downstream writes fail fast (NoActiveLease)"
+        );
+    }
+
+    #[test]
+    fn etag_advanced_consistently_rules() {
+        // No prior etag: never a valid recovery.
+        assert!(!DbLease::etag_advanced_consistently(None, "5"));
+        // Same etag: store never moved — lost.
+        assert!(!DbLease::etag_advanced_consistently(Some("5"), "5"));
+        // Numeric regression: an older revision — lost.
+        assert!(!DbLease::etag_advanced_consistently(Some("5"), "4"));
+        // Numeric strict advance: valid recovery.
+        assert!(DbLease::etag_advanced_consistently(Some("5"), "6"));
+        // Opaque etags that differ: inequality is the strongest signal.
+        assert!(DbLease::etag_advanced_consistently(
+            Some("\"aaa\""),
+            "\"bbb\""
+        ));
+        assert!(!DbLease::etag_advanced_consistently(
+            Some("\"aaa\""),
+            "\"aaa\""
+        ));
     }
 
     // ========================================================================
