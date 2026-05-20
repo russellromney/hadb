@@ -292,6 +292,35 @@ mod tests {
         assert!(lease.is_claimable_by_other_at(claimable_at));
     }
 
+    // Regression guard for the small-`ttl` footgun: the margin math uses
+    // saturating arithmetic, so a degenerate `ttl <= LEASE_SKEW_MARGIN_SECS`
+    // must never panic or underflow — and the no-overlap safety invariant
+    // (holder relinquishes strictly before any claimer may take over) must
+    // still hold even when the dead zone swallows the whole lease. Operators
+    // should keep `ttl_secs` comfortably larger than `2 * LEASE_SKEW_MARGIN_SECS`
+    // (see the doc on `should_relinquish`), but a misconfiguration must fail
+    // safe (early self-relinquish), never unsafe (overlap / panic).
+    #[test]
+    fn degenerate_small_ttl_saturates_and_keeps_no_overlap() {
+        for ttl in [0u64, 1, LEASE_SKEW_MARGIN_SECS, LEASE_SKEW_MARGIN_SECS + 1] {
+            let lease = fixed_lease(1_000, ttl);
+            // Sweep a window spanning well before and after the TTL boundary.
+            for now in 990..=1_010 {
+                // Must not panic/underflow on any of these.
+                let relinquish = lease.should_relinquish_at(now);
+                let claimable = lease.is_claimable_by_other_at(now);
+                // Safety invariant: a claimer may NEVER take over while the
+                // holder still trusts the lease.
+                if claimable {
+                    assert!(
+                        relinquish,
+                        "ttl={ttl}: claimable at {now} but holder had not relinquished"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn lease_data_serialization_roundtrip() {
         let lease = LeaseData {
