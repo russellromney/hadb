@@ -43,7 +43,7 @@ use hadb_lease::FenceSource;
 use hadb_storage::CasResult;
 use reqwest::header::{CONTENT_TYPE, IF_MATCH};
 use serde::Deserialize;
-use turbodb::{Manifest, ManifestMeta, ManifestStore};
+use turbodb::{LeaseFenceError, Manifest, ManifestMeta, ManifestStore};
 
 const CONTENT_TYPE_MSGPACK: &str = "application/msgpack";
 
@@ -256,6 +256,23 @@ impl ManifestStore for CinchManifestStore {
                         etag: None,
                     });
                 }
+                // Phase 004 epoch fence: the server rejected this write
+                // because a newer lease epoch owns the manifest. Fatal —
+                // not retry-able. Surfaced as LeaseFenceError so callers
+                // downcast and stop publishing.
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY => {
+                    let stored = resp
+                        .headers()
+                        .get("X-Manifest-Epoch")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    return Err(LeaseFenceError {
+                        stored,
+                        attempted: manifest.epoch,
+                    }
+                    .into());
+                }
                 reqwest::StatusCode::PRECONDITION_FAILED => {
                     attempt += 1;
                     if attempt >= self.max_retries {
@@ -303,7 +320,18 @@ impl ManifestStore for CinchManifestStore {
                     .map_err(|e| anyhow!("invalid X-Writer-Id: {}", e))?
                     .to_string();
 
-                Ok(Some(ManifestMeta { version, writer_id }))
+                // Epoch header is absent on pre-phase-004 servers; default 0.
+                let epoch = headers
+                    .get("X-Manifest-Epoch")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+
+                Ok(Some(ManifestMeta {
+                    version,
+                    epoch,
+                    writer_id,
+                }))
             }
             reqwest::StatusCode::NOT_FOUND => Ok(None),
             status => {
@@ -435,6 +463,24 @@ mod tests {
         }
 
         let mut store = state.store.lock().await;
+
+        // Epoch fence — mirrors the grabby server contract (and the
+        // mem/s3 stores): a write whose epoch is below the stored
+        // epoch is fenced. Surfaced as 409 GONE-equivalent; the client
+        // maps the matching real-server status to LeaseFenceError. Here
+        // we use 422 UNPROCESSABLE_ENTITY as the fence signal so it is
+        // distinct from the 409 version-CAS conflict.
+        if let Some(existing) = store.get(&params.key) {
+            if incoming.epoch < existing.epoch {
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    "X-Manifest-Epoch",
+                    existing.epoch.to_string().parse().expect("header"),
+                );
+                return (StatusCode::UNPROCESSABLE_ENTITY, headers).into_response();
+            }
+        }
+
         match (expected, store.get(&params.key).cloned()) {
             (None, Some(_)) => StatusCode::CONFLICT.into_response(),
             (None, None) => {
@@ -471,6 +517,10 @@ mod tests {
                     manifest.version.to_string().parse().expect("header"),
                 );
                 headers.insert("X-Writer-Id", manifest.writer_id.parse().expect("header"));
+                headers.insert(
+                    "X-Manifest-Epoch",
+                    manifest.epoch.to_string().parse().expect("header"),
+                );
                 (StatusCode::OK, headers).into_response()
             }
             None => StatusCode::NOT_FOUND.into_response(),
@@ -508,6 +558,7 @@ mod tests {
     fn make_manifest(writer: &str) -> Manifest {
         Manifest {
             version: 0,
+            epoch: 0,
             writer_id: writer.to_string(),
             timestamp_ms: 1000,
             payload: b"test-payload".to_vec(),
@@ -692,6 +743,47 @@ mod tests {
         assert_eq!(meta.writer_id, "node-2");
     }
 
+    /// Plan-named root_pointer_fenced_cas over the HTTP client → mock
+    /// server wire path: a stale-epoch publish surfaces as
+    /// LeaseFenceError (the client maps the server's 422 to it), and
+    /// the stored manifest is untouched. A higher-epoch publish wins.
+    #[tokio::test]
+    async fn root_pointer_fenced_cas() {
+        let (url, _h) = start_mock_server().await;
+        let store = CinchManifestStore::new(&url, "test-token");
+
+        // Leader at epoch 5 publishes the base.
+        let mut e5 = make_manifest("leader-A");
+        e5.epoch = 5;
+        store.put("db", &e5, None).await.expect("first publish");
+        assert_eq!(store.meta("db").await.unwrap().unwrap().epoch, 5);
+
+        // New leader promotes to epoch 6 — wins.
+        let mut e6 = make_manifest("leader-B");
+        e6.epoch = 6;
+        store.put("db", &e6, Some(1)).await.expect("promotion");
+        let meta = store.meta("db").await.unwrap().unwrap();
+        assert_eq!(meta.epoch, 6);
+        assert_eq!(meta.writer_id, "leader-B");
+
+        // Old leader (epoch 5) tries again — fenced over the wire.
+        let mut stale = make_manifest("leader-A");
+        stale.epoch = 5;
+        let err = store
+            .put("db", &stale, Some(2))
+            .await
+            .expect_err("stale-epoch publish must be fenced");
+        let fence = err
+            .downcast_ref::<LeaseFenceError>()
+            .expect("422 must map to LeaseFenceError");
+        assert_eq!(fence.stored, 6);
+        assert_eq!(fence.attempted, 5);
+
+        // Store still holds leader-B's epoch-6 manifest.
+        let current = store.get("db").await.unwrap().unwrap();
+        assert_eq!(current.writer_id, "leader-B");
+    }
+
     #[tokio::test]
     async fn test_content_type_is_msgpack_not_json() {
         // Regression guard against a future accidental revert to JSON.
@@ -703,6 +795,7 @@ mod tests {
         let payload: Vec<u8> = (0u32..512).map(|i| (i & 0xff) as u8).collect();
         let m = Manifest {
             version: 0,
+            epoch: 0,
             writer_id: "node-1".into(),
             timestamp_ms: 0,
             payload: payload.clone(),

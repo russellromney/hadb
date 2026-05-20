@@ -14,6 +14,7 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_bytes = "0.11"
 anyhow = { workspace = true }
+thiserror = "1"
 
 # CasResult is the shared CAS primitive used by both LeaseStore and
 # ManifestStore. It lives in hadb-storage (despite the name; lease

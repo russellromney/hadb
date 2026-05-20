@@ -12,12 +12,13 @@ use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hadb_storage::CasResult;
-use turbodb::{Manifest, ManifestMeta, ManifestStore};
+use turbodb::{check_epoch_fence, Manifest, ManifestMeta, ManifestStore};
 
 use crate::error::{is_not_found, is_precondition_failed};
 
 const META_VERSION: &str = "manifest-version";
 const META_WRITER_ID: &str = "manifest-writer-id";
+const META_EPOCH: &str = "manifest-epoch";
 
 /// ManifestStore backed by S3 conditional PUTs.
 ///
@@ -83,6 +84,7 @@ impl ManifestStore for S3ManifestStore {
         let metadata: HashMap<String, String> = HashMap::from([
             (META_VERSION.to_string(), new_version.to_string()),
             (META_WRITER_ID.to_string(), stored.writer_id.clone()),
+            (META_EPOCH.to_string(), stored.epoch.to_string()),
         ]);
 
         match expected_version {
@@ -120,20 +122,25 @@ impl ManifestStore for S3ManifestStore {
                     .send()
                     .await;
 
-                let (current_etag, current_version) = match head {
+                let (current_etag, current_version, current_epoch) = match head {
                     Ok(output) => {
                         let etag = output
                             .e_tag()
                             .ok_or_else(|| anyhow!("S3 HeadObject returned no ETag"))?
                             .to_string();
-                        let version = output
-                            .metadata()
+                        let meta = output.metadata();
+                        let version = meta
                             .and_then(|m| m.get(META_VERSION))
                             .and_then(|v| v.parse::<u64>().ok())
                             .ok_or_else(|| {
                                 anyhow!("S3 HeadObject missing manifest-version metadata")
                             })?;
-                        (etag, version)
+                        // Epoch metadata is absent on pre-phase-004 objects; treat as 0.
+                        let epoch = meta
+                            .and_then(|m| m.get(META_EPOCH))
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .unwrap_or(0);
+                        (etag, version, epoch)
                     }
                     Err(e) => {
                         if is_not_found(&e) {
@@ -145,6 +152,10 @@ impl ManifestStore for S3ManifestStore {
                         return Err(anyhow!("S3 HeadObject failed: {}", e));
                     }
                 };
+
+                // Epoch fence before version-CAS: a stale leader is
+                // rejected with LeaseFenceError even at the right version.
+                check_epoch_fence(current_epoch, manifest.epoch)?;
 
                 if current_version != expected {
                     return Ok(CasResult {
@@ -206,7 +217,16 @@ impl ManifestStore for S3ManifestStore {
                     .ok_or_else(|| anyhow!("missing {} header", META_WRITER_ID))?
                     .clone();
 
-                Ok(Some(ManifestMeta { version, writer_id }))
+                let epoch = metadata
+                    .get(META_EPOCH)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+
+                Ok(Some(ManifestMeta {
+                    version,
+                    epoch,
+                    writer_id,
+                }))
             }
             Err(e) => {
                 if is_not_found(&e) {
@@ -226,6 +246,7 @@ mod tests {
     fn make_manifest(writer: &str) -> Manifest {
         Manifest {
             version: 0,
+            epoch: 0,
             writer_id: writer.to_string(),
             timestamp_ms: 1000,
             payload: b"test-payload".to_vec(),

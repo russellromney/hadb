@@ -9,7 +9,28 @@ use anyhow::Result;
 use async_trait::async_trait;
 use hadb_storage::CasResult;
 
-use crate::types::{Manifest, ManifestMeta};
+use crate::types::{LeaseFenceError, Manifest, ManifestMeta};
+
+/// Shared epoch-fence check for `ManifestStore::put` implementations.
+///
+/// Returns `Err(LeaseFenceError)` if `attempted_epoch < stored_epoch`
+/// (a stale writer trying to overwrite a newer leader's manifest), or
+/// `Ok(())` otherwise. Call this after reading the current stored
+/// manifest's epoch and before performing the version-CAS.
+///
+/// Equal epochs are allowed through to version-CAS — that's the normal
+/// case where the same leader publishes successive versions within one
+/// lease term.
+pub fn check_epoch_fence(stored_epoch: u64, attempted_epoch: u64) -> Result<()> {
+    if attempted_epoch < stored_epoch {
+        return Err(LeaseFenceError {
+            stored: stored_epoch,
+            attempted: attempted_epoch,
+        }
+        .into());
+    }
+    Ok(())
+}
 
 /// Trait for manifest storage with CAS semantics.
 ///
@@ -22,7 +43,8 @@ pub trait ManifestStore: Send + Sync {
     /// Fetch the full manifest for a key. Returns None if no manifest exists.
     async fn get(&self, key: &str) -> Result<Option<Manifest>>;
 
-    /// Publish a new manifest with CAS on `expected_version`.
+    /// Publish a new manifest with CAS on `expected_version`, fenced by
+    /// the lease epoch.
     ///
     /// - `expected_version: None` means the key must not exist (first publish).
     /// - `expected_version: Some(v)` means the current version must equal `v`.
@@ -32,8 +54,26 @@ pub trait ManifestStore: Send + Sync {
     /// `expected_version + 1` for updates). Implementors must enforce
     /// this.
     ///
-    /// Returns `CasResult { success: true, .. }` on success, or
-    /// `CasResult { success: false, .. }` on version mismatch.
+    /// **Epoch fencing (phase 004).** Before the version-CAS, the store
+    /// compares `manifest.epoch` against the currently-stored manifest's
+    /// epoch:
+    /// - `manifest.epoch < stored.epoch` → the write is **fenced**:
+    ///   return `Err(`[`LeaseFenceError`]`)`. The writer has lost its
+    ///   lease to a newer leader; retrying cannot succeed.
+    /// - `manifest.epoch >= stored.epoch` → proceed to version-CAS.
+    ///
+    /// The epoch check runs before version-CAS so a stale leader is
+    /// fenced even if it happens to hold the current version. On first
+    /// publish (no stored manifest) there is nothing to fence against.
+    ///
+    /// Returns:
+    /// - `Ok(CasResult { success: true, .. })` on success
+    /// - `Ok(CasResult { success: false, .. })` on **version** mismatch
+    ///   (retry-able optimistic-concurrency race)
+    /// - `Err(`[`LeaseFenceError`]`)` on **epoch** fence (fatal — stop
+    ///   writing)
+    ///
+    /// [`LeaseFenceError`]: crate::LeaseFenceError
     async fn put(
         &self,
         key: &str,

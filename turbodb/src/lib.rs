@@ -25,5 +25,5 @@ mod types;
 
 pub use config::{CheckpointConfig, Durability, FlushPolicy};
 pub use hadb_storage::CasResult;
-pub use store::ManifestStore;
-pub use types::{Manifest, ManifestMeta};
+pub use store::{check_epoch_fence, ManifestStore};
+pub use types::{LeaseFenceError, Manifest, ManifestMeta};

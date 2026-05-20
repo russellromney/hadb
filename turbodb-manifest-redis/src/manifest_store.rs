@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hadb_storage::CasResult;
 use redis::AsyncCommands;
-use turbodb::{Manifest, ManifestMeta, ManifestStore};
+use turbodb::{check_epoch_fence, Manifest, ManifestMeta, ManifestStore};
 
 /// Lua script for atomic first publish that also sets the version side-key.
 /// Both KEYS[1] (data) and KEYS[2] (version) are declared so Redis Cluster
@@ -122,6 +122,17 @@ impl ManifestStore for RedisManifestStore {
         let vkey = self.version_key(key);
         let mut conn = self.client.clone();
 
+        // Epoch fence before the version-CAS Lua script. Read the
+        // current manifest's epoch and reject a stale writer. The Lua
+        // version-CAS still provides atomicity; this pre-check turns a
+        // stale-epoch write into a LeaseFenceError rather than a silent
+        // version race. A concurrent higher-epoch publish bumps the
+        // version, so the bounded TOCTOU window collapses into a Lua
+        // CONFLICT anyway.
+        if let Some(existing) = self.get(key).await? {
+            check_epoch_fence(existing.epoch, manifest.epoch)?;
+        }
+
         let new_version = match expected_version {
             None => 1u64,
             Some(v) => v + 1,
@@ -181,6 +192,7 @@ mod tests {
     fn make_manifest(writer: &str) -> Manifest {
         Manifest {
             version: 0,
+            epoch: 0,
             writer_id: writer.to_string(),
             timestamp_ms: 1000,
             payload: b"test-payload".to_vec(),

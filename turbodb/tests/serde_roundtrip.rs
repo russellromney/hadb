@@ -13,6 +13,7 @@ use turbodb::{Manifest, ManifestMeta};
 fn envelope(payload: Vec<u8>) -> Manifest {
     Manifest {
         version: 7,
+        epoch: 11,
         writer_id: "node-42".to_string(),
         timestamp_ms: 1_700_000_000_000,
         payload,
@@ -80,5 +81,6 @@ fn manifest_meta_from_envelope() {
     let m = envelope(b"whatever".to_vec());
     let meta = ManifestMeta::from(&m);
     assert_eq!(meta.version, 7);
+    assert_eq!(meta.epoch, 11);
     assert_eq!(meta.writer_id, "node-42");
 }

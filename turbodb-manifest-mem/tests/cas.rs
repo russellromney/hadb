@@ -9,6 +9,7 @@ use turbodb_manifest_mem::MemManifestStore;
 fn make_manifest(writer: &str) -> Manifest {
     Manifest {
         version: 0,
+        epoch: 0,
         writer_id: writer.to_string(),
         timestamp_ms: 1000,
         payload: b"test-payload".to_vec(),
@@ -249,6 +250,7 @@ async fn empty_string_writer_id_and_key() {
     let store = MemManifestStore::new();
     let m = Manifest {
         version: 0,
+        epoch: 0,
         writer_id: "".to_string(),
         timestamp_ms: 0,
         payload: Vec::new(),
@@ -272,6 +274,7 @@ async fn put_ignores_caller_version_on_create() {
     let store = MemManifestStore::new();
     let m = Manifest {
         version: 999,
+        epoch: 0,
         writer_id: "node-1".to_string(),
         timestamp_ms: 1000,
         payload: b"test-payload".to_vec(),
@@ -292,6 +295,7 @@ async fn put_ignores_caller_version_on_update() {
 
     let m2 = Manifest {
         version: 500,
+        epoch: 0,
         writer_id: "node-1".to_string(),
         timestamp_ms: 2000,
         payload: b"test-payload-2".to_vec(),

@@ -10,7 +10,7 @@ use async_nats::jetstream::kv;
 use async_trait::async_trait;
 use bytes::Bytes;
 use hadb_storage::CasResult;
-use turbodb::{Manifest, ManifestMeta, ManifestStore};
+use turbodb::{check_epoch_fence, Manifest, ManifestMeta, ManifestStore};
 
 /// ManifestStore backed by NATS JetStream Key-Value.
 ///
@@ -107,14 +107,14 @@ impl ManifestStore for NatsManifestStore {
                     .await
                     .map_err(|e| anyhow!("NATS KV entry failed: {}", e))?;
 
-                let (revision, current_version) = match &entry {
+                let (revision, current_version, current_epoch) = match &entry {
                     Some(e) => match e.operation {
                         kv::Operation::Put => {
                             let current: Manifest =
                                 rmp_serde::from_slice(&e.value).map_err(|err| {
                                     anyhow!("failed to deserialize manifest: {}", err)
                                 })?;
-                            (e.revision, current.version)
+                            (e.revision, current.version, current.epoch)
                         }
                         kv::Operation::Delete | kv::Operation::Purge => {
                             return Ok(CasResult {
@@ -130,6 +130,9 @@ impl ManifestStore for NatsManifestStore {
                         });
                     }
                 };
+
+                // Epoch fence before version-CAS.
+                check_epoch_fence(current_epoch, manifest.epoch)?;
 
                 if current_version != expected_version.expect("checked above") {
                     return Ok(CasResult {
@@ -175,6 +178,7 @@ mod tests {
     fn make_manifest(writer: &str) -> Manifest {
         Manifest {
             version: 0,
+            epoch: 0,
             writer_id: writer.to_string(),
             timestamp_ms: 1000,
             payload: b"test-payload".to_vec(),
