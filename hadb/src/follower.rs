@@ -136,12 +136,20 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                     }
                 }
 
-                let is_expired = match &lease_data {
+                // Takeover decision uses the MARGINED claimer check
+                // (`is_claimable_by_other`): a follower may only claim once
+                // the lease is expired PAST the skew margin, which is
+                // strictly after the holder's own relinquish deadline. This
+                // keeps the holder ahead of any claimer so they never
+                // contend at the TTL boundary (Finding 1).
+                let is_claimable = match &lease_data {
                     Ok(None) => true,
                     Ok(Some((data, _etag))) => {
-                        if !data.is_expired() {
+                        if !data.is_claimable_by_other() {
+                            // Lease not yet takeable — keep tracking the
+                            // (possibly recently-expired) leader's address
+                            // and heartbeat node registration.
                             *ctx.leader_address.write().await = data.address.clone();
-                            // Heartbeat node registration with current leader session.
                             if let Some(ref registry) = ctx.node_registry {
                                 let reg = crate::NodeRegistration {
                                     instance_id: ctx.lease.instance_id().to_string(),
@@ -158,7 +166,7 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                                 }
                             }
                         }
-                        data.is_expired()
+                        data.is_claimable_by_other()
                     }
                     Err(e) => {
                         tracing::error!(
@@ -169,7 +177,7 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
                     }
                 };
 
-                if is_expired {
+                if is_claimable {
                     consecutive_expired += 1;
                     if consecutive_expired < ctx.config.required_expired_reads {
                         tracing::debug!(
@@ -379,12 +387,22 @@ pub async fn run_lease_monitor(mut ctx: LeaseMonitorContext) -> Result<bool> {
 ///
 /// This is fully generic (not database-specific) — all databases renew leases the same way.
 ///
-/// Returns true if demoted (CAS conflict or sustained errors), false if cancelled.
+/// Returns true if demoted (CAS conflict, sustained errors, or proactive
+/// self-fence), false if cancelled.
 ///
-/// **Self-demotion on sustained errors:** If `max_consecutive_errors` consecutive
-/// renewals fail with transient errors, the leader self-demotes. During a storage outage,
-/// the lease is expiring while we retry — another node may claim it, creating
-/// split-brain. Self-demotion prevents this.
+/// **Proactive self-fence (the safety backstop):** on every tick — including
+/// ticks where the renewal call itself errored — the leader checks whether
+/// the wall clock has passed its lease's relinquish deadline
+/// (`claimed_at + ttl - skew_margin`, via `DbLease::should_self_fence`). If
+/// so it fences itself immediately, INDEPENDENT of the error count. This
+/// guarantees a partitioned leader (whose renewals all error rather than
+/// CAS-conflict) relinquishes BEFORE TTL — before any follower's margined
+/// claim window opens — closing the ~N·interval split-brain window the
+/// error-count path alone left open.
+///
+/// **Self-demotion on sustained errors:** retained as a fast-path. If
+/// `max_consecutive_errors` consecutive renewals fail with transient errors,
+/// the leader self-demotes even if the proactive deadline has not yet passed.
 pub async fn run_leader_renewal(
     lease: &mut DbLease,
     replicator: &Arc<dyn Replicator>,
@@ -453,11 +471,168 @@ pub async fn run_leader_renewal(
                         );
                     }
                 }
+
+                // Proactive self-fence backstop. Runs on every tick that did
+                // not already return (i.e. after a successful renew, which
+                // pushes the deadline forward and so won't fire, and after a
+                // renewal error, where the deadline is stale and WILL fire
+                // once passed). Independent of consecutive_errors: a leader
+                // whose renewals only ever error still relinquishes before
+                // TTL, before any follower can claim.
+                if lease.should_self_fence() {
+                    metrics.inc(&metrics.demotions_sustained_errors);
+                    tracing::error!(
+                        "Leader '{}': lease relinquish deadline passed (proactive self-fence) — \
+                         demoting before TTL to prevent split-brain",
+                        db_name
+                    );
+                    if tokio::time::timeout(replicator_timeout, replicator.remove(db_name)).await.is_err() {
+                        tracing::error!(
+                            "Leader '{}': replicator.remove() timed out during proactive self-fence", db_name
+                        );
+                    }
+                    let _ = role_tx.send(RoleEvent::Demoted {
+                        db_name: db_name.to_string(),
+                    });
+                    return true;
+                }
             }
             _ = cancel_rx.changed() => {
                 tracing::info!("Leader '{}': renewal cancelled", db_name);
                 return false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::Replicator;
+    use crate::types::RoleEvent;
+    use crate::{CasResult, LeaseStore};
+    use hadb_lease_mem::InMemoryLeaseStore;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// Replicator stub that records whether `remove` was called.
+    struct NoopReplicator;
+
+    #[async_trait]
+    impl Replicator for NoopReplicator {
+        async fn add(&self, _name: &str, _path: &Path) -> Result<()> {
+            Ok(())
+        }
+        async fn pull(&self, _name: &str, _path: &Path) -> Result<()> {
+            Ok(())
+        }
+        async fn remove(&self, _name: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn sync(&self, _name: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// LeaseStore that allows the initial claim (write_if_not_exists) but
+    /// then makes every renewal (write_if_match) fail with a transient
+    /// error — modelling a partitioned leader that can no longer reach the
+    /// store. Reads are delegated so the lease is still visible.
+    struct RenewAlwaysErrorsStore {
+        inner: InMemoryLeaseStore,
+    }
+
+    impl RenewAlwaysErrorsStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryLeaseStore::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LeaseStore for RenewAlwaysErrorsStore {
+        async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
+            self.inner.read(key).await
+        }
+        async fn write_if_not_exists(&self, key: &str, data: Vec<u8>) -> Result<CasResult> {
+            self.inner.write_if_not_exists(key, data).await
+        }
+        async fn write_if_match(
+            &self,
+            _key: &str,
+            _data: Vec<u8>,
+            _etag: &str,
+        ) -> Result<CasResult> {
+            anyhow::bail!("simulated storage partition: renewal cannot reach the lease store")
+        }
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key).await
+        }
+    }
+
+    /// Finding 2: a partitioned leader whose renewals only ever ERROR (never
+    /// CAS-conflict) must fence itself via the proactive deadline BEFORE TTL
+    /// — not after `max_consecutive_renewal_errors` ticks. Here
+    /// `max_consecutive_renewal_errors` is set absurdly high (10_000) so the
+    /// error-count path can never fire; the only thing that can demote is
+    /// the proactive self-fence. We assert it demotes well within the TTL
+    /// window.
+    #[tokio::test]
+    async fn proactive_self_fence_fires_before_ttl() {
+        let store = Arc::new(RenewAlwaysErrorsStore::new());
+        // ttl=1s, margin defaults to 2s, so the relinquish deadline is at
+        // claim time (claimed_at + 1 - 2, saturating) — already past on the
+        // first renewal tick. The leader must demote on that first error
+        // tick via the proactive backstop, not via the error count.
+        let mut lease = DbLease::new(store, "db/_lease.json", "inst-1", "addr-1", 1);
+        assert_eq!(
+            lease.try_claim().await.unwrap(),
+            Role::Leader,
+            "initial claim should succeed"
+        );
+
+        let replicator: Arc<dyn Replicator> = Arc::new(NoopReplicator);
+        let (role_tx, mut role_rx) = tokio::sync::broadcast::channel(8);
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        let metrics = Arc::new(crate::metrics::HaMetrics::new());
+
+        let started = std::time::Instant::now();
+        let demoted = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_leader_renewal(
+                &mut lease,
+                &replicator,
+                "db",
+                &role_tx,
+                Duration::from_millis(50), // fast tick
+                &mut cancel_rx,
+                10_000, // error-count path effectively disabled
+                Duration::from_secs(1),
+                metrics.clone(),
+            ),
+        )
+        .await
+        .expect("renewal loop must terminate, not hang");
+
+        assert!(demoted, "leader must self-demote");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "proactive fence must fire well before the error-count path could ({:?})",
+            started.elapsed()
+        );
+
+        // A Demoted event must have been emitted.
+        let evt = role_rx.try_recv().expect("a role event should be queued");
+        assert!(matches!(evt, RoleEvent::Demoted { .. }), "got {evt:?}");
+
+        // The proactive path increments the sustained-errors demotion metric.
+        assert!(
+            metrics
+                .demotions_sustained_errors
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= 1,
+            "proactive self-fence should record a demotion metric"
+        );
     }
 }

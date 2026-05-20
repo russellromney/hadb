@@ -116,12 +116,7 @@ impl LeaseStore for HangingRenewLeaseStore {
         self.inner.write_if_not_exists(key, data).await
     }
 
-    async fn write_if_match(
-        &self,
-        _key: &str,
-        _data: Vec<u8>,
-        _etag: &str,
-    ) -> Result<CasResult> {
+    async fn write_if_match(&self, _key: &str, _data: Vec<u8>, _etag: &str) -> Result<CasResult> {
         self.renew_started.notify_waiters();
         std::future::pending::<Result<CasResult>>().await
     }
@@ -850,6 +845,7 @@ async fn test_manifest_polling_emits_event_on_version_change() {
     // Publish initial manifest (v1) so the poll establishes a baseline.
     let manifest = Manifest {
         version: 0,
+        epoch: 0,
         writer_id: "other-node".to_string(),
         timestamp_ms: 1000,
         payload: b"test-payload".to_vec(),
@@ -930,6 +926,7 @@ async fn test_manifest_polling_no_event_when_version_unchanged() {
     // Pre-publish a manifest before joining, so the first poll sees version 1.
     let manifest = Manifest {
         version: 0,
+        epoch: 0,
         writer_id: "other-node".to_string(),
         timestamp_ms: 1000,
         payload: b"test-payload".to_vec(),
