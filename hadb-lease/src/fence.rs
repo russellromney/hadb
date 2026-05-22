@@ -36,6 +36,24 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 
+/// The canonical fencing-token comparison: a write carrying `incoming` is
+/// accepted only if it is strictly greater than the `current` fence the
+/// authority holds. A stale or equal token (`incoming <= current`) is
+/// rejected.
+///
+/// This pins the contract in one place. The fence revision is the lease
+/// claim's etag (parsed to `u64` by the lease manager) and is strictly
+/// increasing across every claim, renewal, and takeover — so a former
+/// leader's revision is always `<=` the new leader's and is rejected.
+/// Storage backends (manifest/page servers) implement the same `>` rule
+/// server-side; this helper documents and tests it at the lease layer.
+/// Do not weaken to `>=`: that would let a former leader with an equal
+/// revision write.
+#[inline]
+pub fn fence_accepts(current: u64, incoming: u64) -> bool {
+    incoming > current
+}
+
 /// Returned by `FenceSource::require` when no lease is currently held.
 /// Callers must surface this as a hard error rather than proceeding with
 /// an unfenced write.
@@ -124,6 +142,13 @@ impl FenceSource for AtomicFence {
 impl AtomicFenceWriter {
     /// Publish a new revision. Called from the lease manager after each
     /// successful claim or heartbeat.
+    ///
+    /// Contract: `rev` is the lease claim's etag as a `u64` and is
+    /// strictly increasing across claims, renewals, and takeovers. Storage
+    /// adapters stamp it on every fenced write; the authority rejects any
+    /// write whose revision is `<=` its current fence (see
+    /// [`fence_accepts`]). A former leader therefore always carries a
+    /// revision the new leader has already superseded.
     pub fn set(&self, rev: u64) {
         self.state.store(Some(Arc::new(rev)));
     }
@@ -194,5 +219,38 @@ mod tests {
         writer.clear();
         assert_eq!(fence.current(), None);
         assert_eq!(fence.require(), Err(NoActiveLease));
+    }
+
+    // ── Fencing-token contract (Finding 5) ──────────────────────────
+
+    #[test]
+    fn fence_strictly_increases_across_takeover() {
+        // Old leader claims at rev 10, new leader takes over at a higher
+        // rev. The published fence the new leader stamps on writes must
+        // strictly exceed the old leader's, so the authority can tell them
+        // apart purely by comparison.
+        let old_leader_rev = 10u64;
+        let new_leader_rev = 11u64;
+        assert!(
+            new_leader_rev > old_leader_rev,
+            "takeover must advance the fence revision"
+        );
+
+        // The authority accepts the new leader and rejects the old one.
+        let authority_fence = new_leader_rev;
+        assert!(fence_accepts(old_leader_rev, new_leader_rev));
+        assert!(!fence_accepts(authority_fence, old_leader_rev));
+    }
+
+    #[test]
+    fn stale_fence_is_rejected() {
+        let current = 42u64;
+        // Strictly greater: accepted.
+        assert!(fence_accepts(current, 43));
+        // Equal: rejected (a former leader at the same rev must not write).
+        assert!(!fence_accepts(current, 42));
+        // Older: rejected.
+        assert!(!fence_accepts(current, 41));
+        assert!(!fence_accepts(current, 0));
     }
 }

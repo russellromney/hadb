@@ -692,8 +692,7 @@ mod tests {
     fn test_internal_mode_skips_bearer() {
         // Empty token → auth() does not set Bearer header (existing
         // behavior pinned for the internal-mode contract).
-        let store =
-            CinchLeaseStore::new_internal("http://cinch.internal:8010", "_system/token-db");
+        let store = CinchLeaseStore::new_internal("http://cinch.internal:8010", "_system/token-db");
         assert!(store.token.is_empty());
         assert!(store.internal_database_id.is_some());
     }
