@@ -114,9 +114,9 @@ mod tests {
         }
     }
 
-    /// Plan-named test: a CAS write with a stale (lower) epoch fails
-    /// with LeaseFenceError; a write at the matching-or-higher epoch
-    /// succeeds and updates the pointer atomically.
+    /// A CAS write with a stale (lower) epoch fails with LeaseFenceError; a
+    /// write at the matching-or-higher epoch succeeds and updates the pointer
+    /// atomically.
     #[tokio::test]
     async fn root_pointer_fenced_cas() {
         let store = MemManifestStore::new();

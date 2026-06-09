@@ -135,7 +135,7 @@ impl ManifestStore for S3ManifestStore {
                             .ok_or_else(|| {
                                 anyhow!("S3 HeadObject missing manifest-version metadata")
                             })?;
-                        // Epoch metadata is absent on pre-phase-004 objects; treat as 0.
+                        // Epoch metadata is absent on legacy objects; treat as 0.
                         let epoch = meta
                             .and_then(|m| m.get(META_EPOCH))
                             .and_then(|v| v.parse::<u64>().ok())

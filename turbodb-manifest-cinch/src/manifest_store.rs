@@ -256,10 +256,10 @@ impl ManifestStore for CinchManifestStore {
                         etag: None,
                     });
                 }
-                // Phase 004 epoch fence: the server rejected this write
-                // because a newer lease epoch owns the manifest. Fatal —
-                // not retry-able. Surfaced as LeaseFenceError so callers
-                // downcast and stop publishing.
+                // Epoch fence: the server rejected this write because a newer
+                // lease epoch owns the manifest. Fatal, not retry-able.
+                // Surfaced as LeaseFenceError so callers downcast and stop
+                // publishing.
                 reqwest::StatusCode::UNPROCESSABLE_ENTITY => {
                     let stored = resp
                         .headers()
@@ -320,7 +320,7 @@ impl ManifestStore for CinchManifestStore {
                     .map_err(|e| anyhow!("invalid X-Writer-Id: {}", e))?
                     .to_string();
 
-                // Epoch header is absent on pre-phase-004 servers; default 0.
+                // Epoch header is absent on legacy servers; default 0.
                 let epoch = headers
                     .get("X-Manifest-Epoch")
                     .and_then(|v| v.to_str().ok())
@@ -744,10 +744,9 @@ mod tests {
         assert_eq!(meta.writer_id, "node-2");
     }
 
-    /// Plan-named root_pointer_fenced_cas over the HTTP client → mock
-    /// server wire path: a stale-epoch publish surfaces as
-    /// LeaseFenceError (the client maps the server's 422 to it), and
-    /// the stored manifest is untouched. A higher-epoch publish wins.
+    /// HTTP client → mock server wire path: a stale-epoch publish surfaces as
+    /// LeaseFenceError (the client maps the server's 422 to it), and the stored
+    /// manifest is untouched. A higher-epoch publish wins.
     #[tokio::test]
     async fn root_pointer_fenced_cas() {
         let (url, _h) = start_mock_server().await;

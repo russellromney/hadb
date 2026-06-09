@@ -61,9 +61,8 @@ pub trait ManifestStore: Send + Sync {
     /// `expected_version + 1` for updates). Implementors must enforce
     /// this.
     ///
-    /// **Epoch fencing (phase 004).** Before the version-CAS, the store
-    /// compares `manifest.epoch` against the currently-stored manifest's
-    /// epoch:
+    /// **Epoch fencing.** Before the version-CAS, the store compares
+    /// `manifest.epoch` against the currently-stored manifest's epoch:
     /// - `manifest.epoch < stored.epoch` → the write is **fenced**:
     ///   return `Err(`[`LeaseFenceError`]`)`. The writer has lost its
     ///   lease to a newer leader; retrying cannot succeed.
@@ -91,4 +90,26 @@ pub trait ManifestStore: Send + Sync {
     /// Cheap metadata check without fetching the full storage payload.
     /// Returns version + leadership info for fencing.
     async fn meta(&self, key: &str) -> Result<Option<ManifestMeta>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn epoch_fence_allows_equal_or_higher_epoch() {
+        check_epoch_fence(7, 7).expect("same leader epoch should use version CAS");
+        check_epoch_fence(7, 8).expect("new leader epoch should be allowed");
+    }
+
+    #[test]
+    fn epoch_fence_rejects_stale_epoch_with_typed_error() {
+        let err = check_epoch_fence(7, 6).expect_err("stale epoch must be fenced");
+        let fence = err
+            .downcast_ref::<LeaseFenceError>()
+            .expect("epoch fence must surface the typed error");
+
+        assert_eq!(fence.stored, 7);
+        assert_eq!(fence.attempted, 6);
+    }
 }

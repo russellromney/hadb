@@ -68,6 +68,39 @@ async fn meta_returns_correct_fields() {
     assert_eq!(meta.writer_id, "node-1");
 }
 
+#[tokio::test]
+async fn manifest_store_contract_preserves_opaque_payload_and_fence_meta() {
+    let store = MemManifestStore::new();
+    let payload = [
+        b"TLM1".as_slice(),
+        &[0x00, 0x01, 0xC0, 0xDE, 0xFF],
+        b"turbolite-canonical-envelope",
+    ]
+    .concat();
+    let m = Manifest {
+        version: 999,
+        epoch: 12,
+        writer_id: "leader-A".to_string(),
+        timestamp_ms: 1_700_000_000_000,
+        payload: payload.clone(),
+    };
+
+    let res = store.put("db1", &m, None).await.unwrap();
+    assert!(res.success);
+
+    let fetched = store.get("db1").await.unwrap().expect("manifest");
+    assert_eq!(fetched.version, 1, "store assigns the envelope version");
+    assert_eq!(
+        fetched.payload, payload,
+        "ManifestStore must preserve consumer payload bytes opaquely"
+    );
+
+    let meta = store.meta("db1").await.unwrap().expect("manifest meta");
+    assert_eq!(meta.version, 1);
+    assert_eq!(meta.epoch, 12);
+    assert_eq!(meta.writer_id, "leader-A");
+}
+
 // ============================================================================
 // Failure modes
 // ============================================================================

@@ -7,9 +7,7 @@
 //! direction as `hadb-lease` and `hadb-storage`: bytes-level trait, open
 //! set of consumers.
 //!
-//! Phase Turbogenesis-b: replaces the closed `Backend` enum (which named
-//! `Turbolite` / `TurboliteWalrust` / `Walrust` / `Turbograph` as
-//! variants inside turbodb) with this opaque envelope.
+//! This crate replaces the old closed backend enum with an opaque envelope.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,16 +18,16 @@ pub struct Manifest {
     pub version: u64,
     /// Lease epoch under which this manifest was published.
     ///
-    /// Phase 004 fenced root pointer: `put` rejects any write whose
-    /// `epoch` is **less than** the currently-stored manifest's epoch
-    /// with a [`LeaseFenceError`]. This fences a stale leader (lost its
-    /// lease, still at epoch E) from overwriting a manifest published
-    /// by the new leader at epoch E+1 — even in the race window where
-    /// version-CAS alone could let the stale write through.
+    /// Fenced root pointer: `put` rejects any write whose `epoch` is
+    /// **less than** the currently-stored manifest's epoch with a
+    /// [`LeaseFenceError`]. This fences a stale leader (lost its lease,
+    /// still at epoch E) from overwriting a manifest published by the
+    /// new leader at epoch E+1 — even in the race window where version-CAS
+    /// alone could let the stale write through.
     ///
-    /// Promotion increments the epoch. Default 0 for pre-phase-004 /
-    /// non-fenced publishers (decodes cleanly from old bytes via
-    /// serde default; equal epochs fall back to pure version-CAS).
+    /// Promotion increments the epoch. Default 0 for legacy /
+    /// non-fenced publishers (decodes cleanly from old bytes via serde
+    /// default; equal epochs fall back to pure version-CAS).
     #[serde(default)]
     pub epoch: u64,
     /// Instance ID that last published this manifest.
