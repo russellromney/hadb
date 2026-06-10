@@ -41,6 +41,15 @@ use hadb_storage::{CasResult, StorageBackend};
 mod error;
 use error::{is_not_found, is_precondition_failed};
 
+fn validate_exact_range_len(full: &str, range: &str, actual: usize, expected: u32) -> Result<()> {
+    if actual != expected as usize {
+        return Err(anyhow!(
+            "S3 range-GET {full} ({range}) returned {actual} bytes, expected exactly {expected}",
+        ));
+    }
+    Ok(())
+}
+
 /// Default maximum retry attempts for transient errors.
 pub const DEFAULT_MAX_RETRIES: u32 = 3;
 
@@ -482,6 +491,7 @@ impl StorageBackend for S3Storage {
             {
                 Ok(resp) => {
                     let bytes = resp.body.collect().await?.into_bytes().to_vec();
+                    validate_exact_range_len(&full, &range, bytes.len(), len)?;
                     self.fetch_count.fetch_add(1, Ordering::Relaxed);
                     self.fetch_bytes
                         .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -638,6 +648,13 @@ mod tests {
         assert_eq!(s.bytes_put(), 0);
         assert_eq!(s.fetch_count(), 0);
         assert_eq!(s.put_count(), 0);
+    }
+
+    #[test]
+    fn range_len_validation_rejects_short_and_overlong_bodies() {
+        assert!(validate_exact_range_len("k", "bytes=0-3", 4, 4).is_ok());
+        assert!(validate_exact_range_len("k", "bytes=0-3", 2, 4).is_err());
+        assert!(validate_exact_range_len("k", "bytes=0-3", 6, 4).is_err());
     }
 
     // Object-safety + Send+Sync check.

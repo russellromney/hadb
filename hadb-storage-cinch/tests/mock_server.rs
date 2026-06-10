@@ -46,6 +46,8 @@ struct MockState {
     empty_truncated_count: Arc<AtomicU32>,
     /// If set, the next batch-delete response reports `N` keys in `failed`.
     batch_delete_failed_count: Arc<AtomicU32>,
+    /// If > 0, the next N range GETs ignore the Range header and return 200.
+    ignore_range_count: Arc<AtomicU32>,
 }
 
 impl MockState {
@@ -58,6 +60,7 @@ impl MockState {
             flaky_write_failures: Arc::new(AtomicU32::new(0)),
             empty_truncated_count: Arc::new(AtomicU32::new(0)),
             batch_delete_failed_count: Arc::new(AtomicU32::new(0)),
+            ignore_range_count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -176,6 +179,10 @@ async fn mock_get(
     };
 
     if let Some(range) = headers.get("range").and_then(|v| v.to_str().ok()) {
+        if state.ignore_range_count.load(Ordering::Acquire) > 0 {
+            state.ignore_range_count.fetch_sub(1, Ordering::AcqRel);
+            return Ok((StatusCode::OK, data).into_response());
+        }
         if let Some(rest) = range.strip_prefix("bytes=") {
             if let Some((s, e)) = rest.split_once('-') {
                 let start: usize = s.parse().unwrap_or(0);
@@ -402,6 +409,18 @@ async fn range_get_returns_requested_slice() {
     s.put("k", b"abcdefghij").await.unwrap();
     let slice = s.range_get("k", 2, 4).await.unwrap().unwrap();
     assert_eq!(slice, b"cdef");
+}
+
+#[tokio::test]
+async fn range_get_rejects_range_ignoring_200_response() {
+    let state = MockState::new("tok");
+    state.ignore_range_count.store(1, Ordering::Release);
+    let (url, _h) = start_mock(state).await;
+    let s = store(&url, "tok");
+
+    s.put("k", b"abcdefghij").await.unwrap();
+    let err = s.range_get("k", 2, 4).await.unwrap_err();
+    assert!(err.to_string().contains("expected 206"));
 }
 
 #[tokio::test]

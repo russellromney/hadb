@@ -46,6 +46,15 @@ use serde::Deserialize;
 use hadb_lease::FenceSource;
 use hadb_storage::{CasResult, StorageBackend};
 
+fn validate_exact_range_len(url: &str, range: &str, actual: usize, expected: u32) -> Result<()> {
+    if actual != expected as usize {
+        return Err(anyhow!(
+            "range-GET {url} ({range}) returned {actual} bytes, expected exactly {expected}",
+        ));
+    }
+    Ok(())
+}
+
 /// Default retry count for transient HTTP failures.
 pub const DEFAULT_MAX_RETRIES: u32 = 3;
 
@@ -674,15 +683,20 @@ impl StorageBackend for CinchHttpStorage {
                 .send()
                 .await;
             match resp {
-                Ok(r)
-                    if r.status() == StatusCode::OK
-                        || r.status() == StatusCode::PARTIAL_CONTENT =>
-                {
+                Ok(r) if r.status() == StatusCode::PARTIAL_CONTENT => {
                     let bytes = r.bytes().await?.to_vec();
+                    validate_exact_range_len(&url, &range, bytes.len(), len)?;
                     self.fetch_count.fetch_add(1, Ordering::Relaxed);
                     self.fetch_bytes
                         .fetch_add(bytes.len() as u64, Ordering::Relaxed);
                     return Ok(Some(bytes));
+                }
+                Ok(r) if r.status() == StatusCode::OK => {
+                    let bytes = r.bytes().await?.to_vec();
+                    return Err(anyhow!(
+                        "range-GET {url} ({range}) returned 200 OK with {} bytes; expected 206 Partial Content",
+                        bytes.len()
+                    ));
                 }
                 Ok(r) if r.status() == StatusCode::NOT_FOUND => return Ok(None),
                 Ok(r) if Self::is_transient_status(r.status()) => {
