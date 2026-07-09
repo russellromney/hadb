@@ -30,6 +30,8 @@ pub enum WebhookEvent {
     CorruptionDetected,
     /// Circuit breaker opened due to cascading failures.
     CircuitBreakerOpen,
+    /// A WAL checkpoint/rollover was detected and the backup safety path re-anchored.
+    CheckpointDetected,
 }
 
 impl WebhookEvent {
@@ -39,6 +41,7 @@ impl WebhookEvent {
             WebhookEvent::AuthFailure => "auth_failure",
             WebhookEvent::CorruptionDetected => "corruption_detected",
             WebhookEvent::CircuitBreakerOpen => "circuit_breaker_open",
+            WebhookEvent::CheckpointDetected => "checkpoint_detected",
         }
     }
 
@@ -48,6 +51,7 @@ impl WebhookEvent {
             "auth_failure" => Some(WebhookEvent::AuthFailure),
             "corruption_detected" => Some(WebhookEvent::CorruptionDetected),
             "circuit_breaker_open" => Some(WebhookEvent::CircuitBreakerOpen),
+            "checkpoint_detected" => Some(WebhookEvent::CheckpointDetected),
             _ => None,
         }
     }
@@ -192,6 +196,13 @@ impl WebhookSender {
         self.send(payload).await;
     }
 
+    /// Send checkpoint_detected notification.
+    pub async fn notify_checkpoint_detected(&self, database: &str, error: &str) {
+        let payload =
+            WebhookPayload::new(WebhookEvent::CheckpointDetected, database, error, 1);
+        self.send(payload).await;
+    }
+
     /// Send auth_failure notification.
     pub async fn notify_auth_failure(&self, database: &str, error: &str) {
         let payload = WebhookPayload::new(WebhookEvent::AuthFailure, database, error, 1);
@@ -250,6 +261,10 @@ mod tests {
             WebhookEvent::CircuitBreakerOpen.as_str(),
             "circuit_breaker_open"
         );
+        assert_eq!(
+            WebhookEvent::CheckpointDetected.as_str(),
+            "checkpoint_detected"
+        );
     }
 
     #[test]
@@ -261,6 +276,10 @@ mod tests {
         assert_eq!(
             WebhookEvent::parse("auth_failure"),
             Some(WebhookEvent::AuthFailure)
+        );
+        assert_eq!(
+            WebhookEvent::parse("checkpoint_detected"),
+            Some(WebhookEvent::CheckpointDetected)
         );
         assert_eq!(WebhookEvent::parse("invalid"), None);
     }
