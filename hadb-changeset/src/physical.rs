@@ -1167,4 +1167,49 @@ mod tests {
             ChangesetError::UnsupportedVersion(3)
         ));
     }
+
+    /// FLAG_COMPACTED (0x80) is meaningful ONLY under version 2. A hand-crafted
+    /// version-1 file with 0x80 set in its flags byte is NOT a compacted file:
+    /// the version gate keeps it a normal changeset and the bit stays an opaque
+    /// flag (exactly like any other unknown flag bit on a v1 file). A compacted
+    /// changeset is therefore impossible to represent at version 1 — the flag
+    /// alone can never smuggle compaction past the version gate.
+    #[test]
+    fn flag_compacted_under_version1_is_opaque_not_compacted() {
+        // Start from frozen v1 bytes and force the compacted bit in the flags
+        // byte while leaving the version byte at 1.
+        let mut bytes = GOLDEN_V1.to_vec();
+        assert_eq!(bytes[5], HADBP_VERSION);
+        bytes[6] |= FLAG_COMPACTED; // set 0x80, keep version = 1
+
+        // The trailer checksum covers only prev_checksum + pages (never the
+        // flags byte), so flipping a header flag does not disturb content
+        // integrity — the file still decodes cleanly.
+        let decoded = decode(&bytes).unwrap();
+        assert!(
+            !decoded.is_compacted(),
+            "a version-1 file is never compacted, regardless of flag bits"
+        );
+        assert_eq!(decoded.declared_end_checksum, None);
+        // Under version 1 the flags byte is fully opaque and preserved verbatim.
+        assert_eq!(decoded.header.flags, FLAG_COMPACTED);
+    }
+
+    /// The complement of the above: a compacted changeset is impossible to
+    /// CONSTRUCT at version 1 through the API — declaring an end-of-range value
+    /// forces version 2 (and the flag) at encode time. So `FLAG_COMPACTED with
+    /// version == 1` is never produced by this crate.
+    #[test]
+    fn compacted_encode_always_bumps_version_never_v1_flag() {
+        let compacted = golden_v2_changeset();
+        let encoded = encode(&compacted);
+        assert_eq!(encoded[5], HADBP_VERSION_COMPACTED);
+        assert_eq!(encoded[6] & FLAG_COMPACTED, FLAG_COMPACTED);
+        // There is no code path that sets the flag without also setting v2:
+        // the flag is derived from declared_end_checksum, which is the same
+        // thing that selects the version.
+        let normal = golden_v1_changeset();
+        assert_eq!(encode(&normal)[5], HADBP_VERSION);
+        assert_eq!(encode(&normal)[6] & FLAG_COMPACTED, 0);
+    }
 }
