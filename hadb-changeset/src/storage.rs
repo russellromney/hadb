@@ -227,7 +227,11 @@ pub async fn discover_strict_physical_chain(
             )
         })?;
 
-        expected_checksum = changeset.checksum;
+        // Advance by the chain-end value, which for a COMPACTED changeset is its
+        // DECLARED end-of-range value (not its recomputed content checksum), so
+        // a merged range links to its successor exactly as the source sequence
+        // did. For a normal changeset this is just its checksum.
+        expected_checksum = physical::chain_end(&changeset);
         expected_seq += 1;
         count += 1;
     }
@@ -449,6 +453,86 @@ mod tests {
                 count: 2,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn strict_physical_chain_links_through_compacted_changeset() {
+        // A compacted changeset sits in the live chain. Its declared end value
+        // differs from its own content checksum; the successor chains from the
+        // declared end. discover_strict must advance via chain_end, not checksum.
+        let store = InMemoryObjectStore::new();
+        let base = StrictChainBase {
+            seq: 10,
+            checksum: 111,
+        };
+        let declared = 0x0BAD_F00D_0BAD_F00Du64;
+        let cs11 = PhysicalChangeset::new_compacted(
+            11,
+            base.checksum,
+            PageIdSize::U64,
+            262144,
+            vec![page(0, 0x22, 32)],
+            declared,
+        );
+        assert_ne!(
+            physical::chain_end(&cs11),
+            cs11.checksum,
+            "test is only meaningful when declared end differs from checksum"
+        );
+        // cs12 chains from the DECLARED end of the compacted cs11.
+        let cs12 = make_cs(12, declared);
+        upload_physical(&store, "test/", "mydb", &cs11)
+            .await
+            .unwrap();
+        upload_physical(&store, "test/", "mydb", &cs12)
+            .await
+            .unwrap();
+
+        let head = discover_strict_physical_chain(&store, "test/", "mydb", base)
+            .await
+            .unwrap();
+        assert_eq!(
+            head,
+            StrictChainHead {
+                seq: 12,
+                checksum: cs12.checksum,
+                count: 2,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_physical_chain_rejects_successor_not_chaining_from_declared_end() {
+        // If the successor chains from the compacted changeset's content
+        // checksum instead of its declared end, linkage must break loudly.
+        let store = InMemoryObjectStore::new();
+        let base = StrictChainBase {
+            seq: 10,
+            checksum: 111,
+        };
+        let declared = 0x0BAD_F00D_0BAD_F00Du64;
+        let cs11 = PhysicalChangeset::new_compacted(
+            11,
+            base.checksum,
+            PageIdSize::U64,
+            262144,
+            vec![page(0, 0x22, 32)],
+            declared,
+        );
+        // Wrongly chain cs12 from cs11.checksum (content) rather than declared.
+        let cs12 = make_cs(12, cs11.checksum);
+        upload_physical(&store, "test/", "mydb", &cs11)
+            .await
+            .unwrap();
+        upload_physical(&store, "test/", "mydb", &cs12)
+            .await
+            .unwrap();
+
+        let err = discover_strict_physical_chain(&store, "test/", "mydb", base)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("checksum chain break"), "{err}");
     }
 
     #[tokio::test]
