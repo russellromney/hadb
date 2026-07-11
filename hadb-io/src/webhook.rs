@@ -198,8 +198,7 @@ impl WebhookSender {
 
     /// Send checkpoint_detected notification.
     pub async fn notify_checkpoint_detected(&self, database: &str, error: &str) {
-        let payload =
-            WebhookPayload::new(WebhookEvent::CheckpointDetected, database, error, 1);
+        let payload = WebhookPayload::new(WebhookEvent::CheckpointDetected, database, error, 1);
         self.send(payload).await;
     }
 
