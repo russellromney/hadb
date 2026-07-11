@@ -10,7 +10,7 @@ keywords = ["ha", "cinch", "lease", "coordination"]
 categories = ["database", "network-programming"]
 
 [dependencies]
-hadb-lease = { path = "../hadb-lease", version = "0.4.0" }
+hadb-lease = { path = "../hadb-lease", version = "0.5.0" }
 async-trait.workspace = true
 anyhow.workspace = true
 tokio.workspace = true

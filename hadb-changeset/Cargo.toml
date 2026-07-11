@@ -14,7 +14,7 @@ test-utils = []
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-hadb-storage = { path = "../hadb-storage" }
+hadb-storage = { path = "../hadb-storage", version = "0.5.0" }
 sha2 = "0.10"
 thiserror = "2"
 tokio = { workspace = true }

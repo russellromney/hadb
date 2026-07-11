@@ -10,8 +10,8 @@ keywords = ["database", "manifest", "nats", "jetstream"]
 categories = ["database", "network-programming"]
 
 [dependencies]
-turbodb = { path = "../turbodb", version = "0.4.0" }
-hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+turbodb = { path = "../turbodb", version = "0.5.0" }
+hadb-storage = { path = "../hadb-storage", version = "0.5.0" }
 async-nats = "0.46"
 async-trait = { workspace = true }
 anyhow = { workspace = true }

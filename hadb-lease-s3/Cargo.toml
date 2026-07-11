@@ -11,8 +11,8 @@ categories = ["database", "network-programming"]
 
 [dependencies]
 # Core hadb dependencies
-hadb = { path = "../hadb", version = "0.4.0" }
-hadb-lease = { path = "../hadb-lease", version = "0.4.0" }
+hadb = { path = "../hadb", version = "0.5.0" }
+hadb-lease = { path = "../hadb-lease", version = "0.5.0" }
 
 # Async runtime
 tokio = { workspace = true }

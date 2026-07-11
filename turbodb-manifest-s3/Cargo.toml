@@ -10,8 +10,8 @@ keywords = ["database", "manifest", "s3", "cas"]
 categories = ["database", "network-programming"]
 
 [dependencies]
-turbodb = { path = "../turbodb", version = "0.4.0" }
-hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+turbodb = { path = "../turbodb", version = "0.5.0" }
+hadb-storage = { path = "../hadb-storage", version = "0.5.0" }
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-smithy-types = "1"

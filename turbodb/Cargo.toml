@@ -19,7 +19,7 @@ thiserror = "1"
 # CasResult is the shared CAS primitive used by both LeaseStore and
 # ManifestStore. It lives in hadb-storage (despite the name; lease
 # crates re-export it from there too).
-hadb-storage = { path = "../hadb-storage", version = "0.4.0" }
+hadb-storage = { path = "../hadb-storage", version = "0.5.0" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
