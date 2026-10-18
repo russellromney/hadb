@@ -581,16 +581,18 @@ mod tests {
     #[tokio::test]
     async fn proactive_self_fence_fires_before_ttl() {
         let store = Arc::new(RenewAlwaysErrorsStore::new());
-        // ttl=1s, margin defaults to 2s, so the relinquish deadline is at
-        // claim time (claimed_at + 1 - 2, saturating) — already past on the
-        // first renewal tick. The leader must demote on that first error
-        // tick via the proactive backstop, not via the error count.
-        let mut lease = DbLease::new(store, "db/_lease.json", "inst-1", "addr-1", 1);
+        // Use a real holder window: an already-expired grant (ttl <= margin)
+        // now correctly fails at claim. Renewal errors must revoke the fence
+        // and the proactive deadline must demote before this 4-second TTL.
+        let (fence, writer) = hadb_lease::AtomicFence::new();
+        let mut lease = DbLease::new(store, "db/_lease.json", "inst-1", "addr-1", 4)
+            .with_fence_writer(Arc::new(writer));
         assert_eq!(
             lease.try_claim().await.unwrap(),
             Role::Leader,
             "initial claim should succeed"
         );
+        assert!(fence.current().is_some());
 
         let replicator: Arc<dyn Replicator> = Arc::new(NoopReplicator);
         let (role_tx, mut role_rx) = tokio::sync::broadcast::channel(8);
@@ -617,7 +619,11 @@ mod tests {
 
         assert!(demoted, "leader must self-demote");
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            fence.current().is_none(),
+            "partition must revoke the active fence"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
             "proactive fence must fire well before the error-count path could ({:?})",
             started.elapsed()
         );

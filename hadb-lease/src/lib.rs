@@ -137,7 +137,7 @@ fn now_secs() -> u64 {
 /// - Leader claims lease via `write_if_not_exists`
 /// - Leader renews lease via `write_if_match`
 /// - Followers read lease to discover leader via `read`
-/// - Leader releases lease via `delete` on graceful shutdown
+/// - Leader releases its held revision via `release_if_match` on shutdown
 #[async_trait]
 pub trait LeaseStore: Send + Sync {
     /// Build the on-store key for a given coordinator scope (typically a
@@ -156,7 +156,8 @@ pub trait LeaseStore: Send + Sync {
     /// Read a key, returning (data, etag). None if key doesn't exist.
     ///
     /// The etag is an opaque version token used for CAS operations.
-    /// For S3: the ETag header. For NATS KV: the revision number.
+    /// For revisioned S3 records and NATS KV, this is a numeric revision.
+    /// Fence-enforced callers require positive, persistently ordered revisions.
     async fn read(&self, key: &str) -> Result<Option<(Vec<u8>, String)>>;
 
     /// Write only if key doesn't exist (create). CAS.
@@ -173,10 +174,34 @@ pub trait LeaseStore: Send + Sync {
     /// the lease (CAS conflict - self-fencing).
     async fn write_if_match(&self, key: &str, data: Vec<u8>, etag: &str) -> Result<CasResult>;
 
-    /// Delete a key (best-effort for lease release).
+    /// Relinquish exactly the coordinator lease identified by `etag`.
     ///
-    /// Used by leader on graceful shutdown to release the lease immediately
-    /// instead of waiting for TTL expiration. Failures are logged but not fatal.
+    /// Returns false on a stale witness or absent key. This does not promise
+    /// deletion: the default atomically replaces the held version with an
+    /// expired `LeaseData` sentinel, immediately claimable at normal Unix times
+    /// (past the clock-skew margin). It does not inspect the stored payload.
+    /// The sentinel is not sleeping and cannot confirm the former session.
+    /// Backends may override this with atomic removal or a logical tombstone.
+    /// Never refresh the expected token or fall back to unconditional deletion.
+    async fn release_if_match(&self, key: &str, etag: &str) -> Result<bool> {
+        let expired = LeaseData {
+            instance_id: String::new(),
+            address: String::new(),
+            claimed_at: 0,
+            ttl_secs: 0,
+            session_id: String::new(),
+            sleeping: false,
+        };
+        Ok(self
+            .write_if_match(key, serde_json::to_vec(&expired)?, etag)
+            .await?
+            .success)
+    }
+
+    /// Administrative deletion, without ownership checks.
+    ///
+    /// Use `release_if_match`, not this method, to relinquish an owned lease.
+    /// Backends may retain tombstones while making `read` return None.
     async fn delete(&self, key: &str) -> Result<()>;
 }
 

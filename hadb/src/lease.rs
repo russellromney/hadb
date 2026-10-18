@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Result};
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{LeaseStore, Role};
 use hadb_lease::AtomicFenceWriter;
@@ -12,11 +14,69 @@ use hadb_lease::AtomicFenceWriter;
 // `haqlite::LeaseData`) keep working.
 pub use hadb_lease::LeaseData;
 
+/// A cleanup handle for the actual ownership task. It remembers only receipts
+/// that task confirmed, never authority reconstructed from an instance ID read.
+#[derive(Clone)]
+pub(crate) struct LeaseRelease {
+    store: Arc<dyn LeaseStore>,
+    key: String,
+    witness: Arc<Mutex<Option<String>>>,
+}
+
+impl LeaseRelease {
+    pub(crate) async fn release(&self) -> Result<()> {
+        let held = self
+            .witness
+            .lock()
+            .expect("lease witness lock poisoned")
+            .take();
+        if let Some(etag) = held {
+            self.store.release_if_match(&self.key, &etag).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Retain a confirmed fence during bounded I/O, but revoke it if an operation
+/// errors or its future is dropped. An uncertain commit cannot extend authority.
+struct FenceGuard {
+    writer: Option<Arc<AtomicFenceWriter>>,
+}
+
+impl FenceGuard {
+    fn confirmed(&mut self) {
+        self.writer = None;
+    }
+}
+
+impl Drop for FenceGuard {
+    fn drop(&mut self) {
+        if let Some(writer) = &self.writer {
+            writer.clear();
+        }
+    }
+}
+
+async fn before_deadline<T>(
+    deadline: u64,
+    operation: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let remaining = Duration::from_secs(deadline)
+        .checked_sub(elapsed)
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| anyhow!("Lease holder deadline passed"))?;
+    tokio::time::timeout(remaining, operation)
+        .await
+        .map_err(|_| anyhow!("Lease operation exceeded holder deadline"))?
+}
+
 /// Per-database CAS lease manager.
 ///
 /// Handles claim, renew, release for a single database's lease key.
-/// Uses post-claim verification with jitter to handle backends (like Tigris)
-/// that don't enforce conditional PUTs.
+/// Requires atomic CAS; read-back cannot make non-atomic backends safe.
 pub struct DbLease {
     store: Arc<dyn LeaseStore>,
     lease_key: String,
@@ -24,6 +84,7 @@ pub struct DbLease {
     address: String,
     ttl_secs: u64,
     current_etag: Option<String>,
+    release: LeaseRelease,
     /// Generated fresh on every new claim (not renewal).
     session_id: String,
     /// Exclusive writer side of the fence. The paired `AtomicFence` is the
@@ -51,8 +112,14 @@ impl DbLease {
         address: &str,
         ttl_secs: u64,
     ) -> Self {
+        let release = LeaseRelease {
+            store: store.clone(),
+            key: lease_key.to_string(),
+            witness: Arc::new(Mutex::new(None)),
+        };
         Self {
             store,
+            release,
             lease_key: lease_key.to_string(),
             instance_id: instance_id.to_string(),
             address: address.to_string(),
@@ -70,6 +137,67 @@ impl DbLease {
     pub fn with_fence_writer(mut self, writer: Arc<AtomicFenceWriter>) -> Self {
         self.fence_writer = Some(writer);
         self
+    }
+
+    pub(crate) fn release_handle(&self) -> LeaseRelease {
+        self.release.clone()
+    }
+
+    fn fence_guard(&self) -> FenceGuard {
+        FenceGuard {
+            writer: self.fence_writer.clone(),
+        }
+    }
+
+    fn receipt_deadline(&self, claimed_at: u64) -> u64 {
+        claimed_at
+            .saturating_add(self.ttl_secs)
+            .saturating_sub(hadb_lease::LEASE_SKEW_MARGIN_SECS)
+    }
+
+    fn forget_ownership(&mut self) {
+        self.current_etag = None;
+        self.current_claimed_at = None;
+        *self
+            .release
+            .witness
+            .lock()
+            .expect("lease witness lock poisoned") = None;
+        self.clear_fence_token();
+    }
+
+    fn accept_receipt(
+        &mut self,
+        etag: Option<String>,
+        claimed_at: u64,
+        prior: Option<&str>,
+    ) -> Result<()> {
+        let etag = etag
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("Successful lease write returned no CAS receipt"))?;
+        if let Ok(revision) = etag.parse::<u64>() {
+            if revision == 0
+                || prior
+                    .and_then(|old| old.parse::<u64>().ok())
+                    .is_some_and(|old| revision <= old)
+            {
+                return Err(anyhow!(
+                    "Lease receipt did not advance its numeric revision"
+                ));
+            }
+        }
+        if now_secs() >= self.receipt_deadline(claimed_at) {
+            return Err(anyhow!("Lease receipt arrived after holder deadline"));
+        }
+        *self
+            .release
+            .witness
+            .lock()
+            .expect("lease witness lock poisoned") = Some(etag.clone());
+        self.current_etag = Some(etag);
+        self.current_claimed_at = Some(claimed_at);
+        self.update_fence_token();
+        Ok(())
     }
 
     /// Publish the current etag (parsed as a `u64` lease revision) into
@@ -109,7 +237,9 @@ impl DbLease {
 
     /// Try to claim the lease. Returns Leader if we got it, Follower if someone else holds it.
     pub async fn try_claim(&mut self) -> Result<Role> {
-        match self.read().await? {
+        let mut guard = self.fence_guard();
+        self.forget_ownership();
+        let role = match self.read().await? {
             None => {
                 // No lease exists — try to create one.
                 self.try_claim_new().await
@@ -140,12 +270,17 @@ impl DbLease {
                     Ok(Role::Follower)
                 }
             }
+        }?;
+        if role == Role::Leader {
+            guard.confirmed();
         }
+        Ok(role)
     }
 
     /// Renew an existing lease we hold. Returns false if we lost it (CAS conflict).
     /// Keeps the same session_id (no post-claim verify needed — only leader renews).
     pub async fn renew(&mut self) -> Result<bool> {
+        let mut guard = self.fence_guard();
         let etag = self
             .current_etag
             .as_ref()
@@ -155,19 +290,30 @@ impl DbLease {
         let lease = self.make_lease();
         let claimed_at = lease.claimed_at;
         let body = serde_json::to_vec(&lease)?;
-        let result = self
-            .store
-            .write_if_match(&self.lease_key, body, &etag)
-            .await?;
-
-        if result.success {
-            self.current_etag = result.etag;
-            self.current_claimed_at = Some(claimed_at);
-            self.update_fence_token();
-            Ok(true)
-        } else {
-            self.recover_ambiguous_renewal_conflict().await
+        let deadline = self
+            .renew_deadline_secs()
+            .unwrap_or_else(|| self.receipt_deadline(claimed_at));
+        if now_secs() >= deadline {
+            // Retain the last deadline for the renewal loop's proactive
+            // demotion check. The operation guard revokes the active fence.
+            return Err(anyhow!("Lease holder deadline passed"));
         }
+        let result = before_deadline(
+            deadline,
+            self.store.write_if_match(&self.lease_key, body, &etag),
+        )
+        .await?;
+
+        let renewed = if result.success {
+            self.accept_receipt(result.etag, claimed_at, Some(&etag))?;
+            true
+        } else {
+            before_deadline(deadline, self.recover_ambiguous_renewal_conflict()).await?
+        };
+        if renewed {
+            guard.confirmed();
+        }
+        Ok(renewed)
     }
 
     async fn recover_ambiguous_renewal_conflict(&mut self) -> Result<bool> {
@@ -190,18 +336,14 @@ impl DbLease {
                     "Lease renewal CAS conflict matched our current session on read-back \
                      with an advanced etag — treating prior ambiguous renewal as accepted"
                 );
-                self.current_etag = Some(etag);
-                self.current_claimed_at = Some(lease.claimed_at);
-                self.update_fence_token();
+                self.accept_receipt(Some(etag), lease.claimed_at, prior_etag.as_deref())?;
                 Ok(true)
             }
             _ => {
                 tracing::warn!(
                     "Lease renewal failed (ETag mismatch / unexpected read-back) — lost lease"
                 );
-                self.current_etag = None;
-                self.current_claimed_at = None;
-                self.clear_fence_token();
+                self.forget_ownership();
                 Ok(false)
             }
         }
@@ -238,12 +380,14 @@ impl DbLease {
         }
     }
 
-    /// Release the lease (best-effort delete).
+    /// Relinquish only our held version. Local authority is cleared before
+    /// any I/O, including when release errors or its future is cancelled.
+    /// Some stores leave an immediately expired record rather than deleting it.
     pub async fn release(&mut self) -> Result<()> {
-        self.store.delete(&self.lease_key).await?;
         self.current_etag = None;
         self.current_claimed_at = None;
         self.clear_fence_token();
+        self.release.release().await?;
         Ok(())
     }
 
@@ -273,7 +417,10 @@ impl DbLease {
         &self.session_id
     }
 
-    /// Whether this lease currently holds a valid etag (i.e. we believe we hold the lease).
+    /// Whether we retain a CAS witness for conditional retry or release.
+    /// This is not proof of an active lease: an error can revoke the paired
+    /// fence while retaining the last receipt. Check renewal results and the
+    /// fence, not this cache-presence flag, before issuing owned writes.
     pub fn has_etag(&self) -> bool {
         self.current_etag.is_some()
     }
@@ -289,15 +436,14 @@ impl DbLease {
         let lease = self.make_lease();
         let claimed_at = lease.claimed_at;
         let body = serde_json::to_vec(&lease)?;
-        let result = self
-            .store
-            .write_if_not_exists(&self.lease_key, body)
-            .await?;
+        let result = before_deadline(
+            self.receipt_deadline(claimed_at),
+            self.store.write_if_not_exists(&self.lease_key, body),
+        )
+        .await?;
 
         if result.success {
-            self.current_etag = result.etag;
-            self.current_claimed_at = Some(claimed_at);
-            self.update_fence_token();
+            self.accept_receipt(result.etag, claimed_at, None)?;
             Ok(Role::Leader)
         } else {
             Ok(Role::Follower)
@@ -309,15 +455,15 @@ impl DbLease {
         let lease = self.make_lease();
         let claimed_at = lease.claimed_at;
         let body = serde_json::to_vec(&lease)?;
-        let result = self
-            .store
-            .write_if_match(&self.lease_key, body, expired_etag)
-            .await?;
+        let result = before_deadline(
+            self.receipt_deadline(claimed_at),
+            self.store
+                .write_if_match(&self.lease_key, body, expired_etag),
+        )
+        .await?;
 
         if result.success {
-            self.current_etag = result.etag;
-            self.current_claimed_at = Some(claimed_at);
-            self.update_fence_token();
+            self.accept_receipt(result.etag, claimed_at, Some(expired_etag))?;
             Ok(Role::Leader)
         } else {
             Ok(Role::Follower)
@@ -327,13 +473,14 @@ impl DbLease {
     /// Write the lease with `sleeping: true` — signals followers to shut down gracefully.
     /// Only valid when we hold the lease (have an etag).
     pub async fn set_sleeping(&mut self) -> Result<bool> {
+        let mut guard = self.fence_guard();
         let etag = self
             .current_etag
             .as_ref()
             .ok_or_else(|| anyhow!("No ETag — cannot set sleeping without prior claim"))?
             .clone();
 
-        let claimed_at = chrono::Utc::now().timestamp() as u64;
+        let claimed_at = now_secs();
         let lease = LeaseData {
             instance_id: self.instance_id.clone(),
             address: self.address.clone(),
@@ -343,21 +490,22 @@ impl DbLease {
             sleeping: true,
         };
         let body = serde_json::to_vec(&lease)?;
-        let result = self
-            .store
-            .write_if_match(&self.lease_key, body, &etag)
-            .await?;
+        let deadline = self
+            .renew_deadline_secs()
+            .unwrap_or_else(|| self.receipt_deadline(claimed_at));
+        let result = before_deadline(
+            deadline,
+            self.store.write_if_match(&self.lease_key, body, &etag),
+        )
+        .await?;
 
         if result.success {
-            self.current_etag = result.etag;
-            self.current_claimed_at = Some(claimed_at);
-            self.update_fence_token();
+            self.accept_receipt(result.etag, claimed_at, Some(&etag))?;
+            guard.confirmed();
             Ok(true)
         } else {
             tracing::warn!("set_sleeping CAS conflict — lost lease");
-            self.current_etag = None;
-            self.current_claimed_at = None;
-            self.clear_fence_token();
+            self.forget_ownership();
             Ok(false)
         }
     }
@@ -366,7 +514,7 @@ impl DbLease {
         LeaseData {
             instance_id: self.instance_id.clone(),
             address: self.address.clone(),
-            claimed_at: chrono::Utc::now().timestamp() as u64,
+            claimed_at: now_secs(),
             ttl_secs: self.ttl_secs,
             session_id: self.session_id.clone(),
             sleeping: false,
@@ -398,6 +546,12 @@ impl DbLease {
     /// [`should_self_fence`](Self::should_self_fence) with an injected clock.
     pub fn should_self_fence_at(&self, now: u64) -> bool {
         matches!(self.renew_deadline_secs(), Some(deadline) if now >= deadline)
+    }
+}
+
+impl Drop for DbLease {
+    fn drop(&mut self) {
+        self.clear_fence_token();
     }
 }
 
@@ -848,7 +1002,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_release() {
-        let store = Arc::new(MockLeaseStore::new());
+        let store = Arc::new(InMemoryLeaseStore::new());
         let mut lease = DbLease::new(store.clone(), "db1/_lease.json", "inst-1", "addr-1", 60);
 
         lease.try_claim().await.unwrap();

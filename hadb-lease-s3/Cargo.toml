@@ -33,6 +33,8 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 uuid = { workspace = true }

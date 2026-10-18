@@ -98,6 +98,16 @@ impl LeaseStore for InMemoryLeaseStore {
         }
     }
 
+    async fn release_if_match(&self, key: &str, etag: &str) -> Result<bool> {
+        let mut leases = self.lock();
+        if leases.get(key).is_some_and(|(_, current)| current == etag) {
+            leases.remove(key);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     async fn delete(&self, key: &str) -> Result<()> {
         self.lock().remove(key);
         Ok(())

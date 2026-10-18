@@ -22,6 +22,7 @@ struct MockReplicator {
     calls: Arc<Mutex<Vec<String>>>,
     should_fail: Arc<AtomicBool>,
     pull_delay_ms: Arc<AtomicU64>,
+    remove_fence: Arc<Mutex<Option<hadb_lease::AtomicFence>>>,
 }
 
 impl MockReplicator {
@@ -30,6 +31,7 @@ impl MockReplicator {
             calls: Arc::new(Mutex::new(Vec::new())),
             should_fail: Arc::new(AtomicBool::new(false)),
             pull_delay_ms: Arc::new(AtomicU64::new(0)),
+            remove_fence: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -70,6 +72,12 @@ impl Replicator for MockReplicator {
     }
 
     async fn remove(&self, name: &str) -> Result<()> {
+        if let Some(fence) = self.remove_fence.lock().unwrap().as_ref() {
+            anyhow::ensure!(
+                fence.current().is_some(),
+                "final remove requires an active lease"
+            );
+        }
         if self.should_fail.load(Ordering::SeqCst) {
             return Err(anyhow!("mock replicator.remove failed"));
         }
@@ -91,6 +99,8 @@ impl Replicator for MockReplicator {
 struct HangingRenewLeaseStore {
     inner: InMemoryLeaseStore,
     renew_started: Arc<Notify>,
+    release_fence: Mutex<Option<hadb_lease::AtomicFence>>,
+    release_observation: Mutex<Option<bool>>,
 }
 
 impl HangingRenewLeaseStore {
@@ -98,6 +108,8 @@ impl HangingRenewLeaseStore {
         Self {
             inner: InMemoryLeaseStore::new(),
             renew_started: Arc::new(Notify::new()),
+            release_fence: Mutex::new(None),
+            release_observation: Mutex::new(None),
         }
     }
 
@@ -116,7 +128,18 @@ impl LeaseStore for HangingRenewLeaseStore {
         self.inner.write_if_not_exists(key, data).await
     }
 
-    async fn write_if_match(&self, _key: &str, _data: Vec<u8>, _etag: &str) -> Result<CasResult> {
+    async fn write_if_match(&self, _key: &str, data: Vec<u8>, _etag: &str) -> Result<CasResult> {
+        if serde_json::from_slice::<LeaseData>(&data).is_ok_and(|lease| lease.ttl_secs == 0) {
+            // Observe the public release CAS BEFORE its await can allow an
+            // aborted-but-not-yet-joined owner to finish dropping its fence.
+            let active = self
+                .release_fence
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|fence| fence.current().is_some());
+            *self.release_observation.lock().unwrap() = Some(active);
+        }
         self.renew_started.notify_waiters();
         std::future::pending::<Result<CasResult>>().await
     }
@@ -391,6 +414,56 @@ async fn test_ha_leader_handoff() {
 
     let calls = replicator.calls();
     assert!(calls.contains(&"remove(testdb)".to_string()));
+}
+
+#[tokio::test]
+async fn test_final_remove_requires_live_ownership_and_errors_remain_retryable() {
+    for handoff in [false, true] {
+        let store = Arc::new(InMemoryLeaseStore::new());
+        let (fence, writer) = hadb_lease::AtomicFence::new();
+        let mut config = CoordinatorConfig::default();
+        config.fence_writer = Some(Arc::new(writer));
+        config.lease = Some(LeaseConfig::new(
+            store.clone(),
+            "owner".into(),
+            "address".into(),
+        ));
+        let (coordinator, replicator) = test_coordinator(config);
+        *replicator.remove_fence.lock().unwrap() = Some(fence.clone());
+        let path = PathBuf::from("unused-lease-contract.db");
+        assert_eq!(
+            coordinator.join("db", &path).await.unwrap().role,
+            Role::Leader
+        );
+        replicator.set_fail(true);
+        let failure = if handoff {
+            coordinator.handoff("db").await.map(|_| ())
+        } else {
+            coordinator.leave("db").await
+        };
+        let failure = failure.expect_err("final flush errors must reach the caller");
+        assert!(
+            failure.to_string().contains("mock replicator."),
+            "preserve the injected flush error, not a missing-fence error: {failure}"
+        );
+        assert!(
+            coordinator.contains("db").await,
+            "failed final flush must remain retryable"
+        );
+        assert!(
+            fence.current().is_some(),
+            "failed flush must not revoke confirmed ownership"
+        );
+        assert!(store.read("db").await.unwrap().is_some());
+        replicator.set_fail(false);
+        if handoff {
+            assert!(coordinator.handoff("db").await.unwrap());
+        } else {
+            coordinator.leave("db").await.unwrap();
+        }
+        assert!(fence.current().is_none());
+        assert!(store.read("db").await.unwrap().is_none());
+    }
 }
 
 #[tokio::test]
@@ -735,6 +808,72 @@ async fn test_leave_aborts_stuck_leader_renewal_task() {
 
     assert!(!coordinator.contains("ha_db1").await);
     assert!(replicator.calls().contains(&"remove(ha_db1)".to_string()));
+}
+
+#[tokio::test]
+async fn test_cancelled_leave_retains_owner_join_for_retry() {
+    for follower_first in [false, true] {
+        let store = Arc::new(HangingRenewLeaseStore::new());
+        let key = store.key_for("db");
+        if follower_first {
+            let mut foreign = DbLease::new(store.clone(), &key, "other", "other-address", 60);
+            assert_eq!(foreign.try_claim().await.unwrap(), Role::Leader);
+        }
+        let renew_started = store.renew_started();
+        let (fence, writer) = hadb_lease::AtomicFence::new();
+        *store.release_fence.lock().unwrap() = Some(fence.clone());
+        let mut config = CoordinatorConfig::default();
+        config.fence_writer = Some(Arc::new(writer));
+        let mut lease = LeaseConfig::new(store.clone(), "owner".into(), "address".into());
+        lease.follower_poll_interval = Duration::from_millis(10);
+        config.lease = Some(lease);
+        let (coordinator, _) = test_coordinator(config);
+        let joined = coordinator
+            .join("db", &PathBuf::from("unused-cancellation-contract.db"))
+            .await
+            .unwrap();
+        assert_eq!(
+            joined.role,
+            if follower_first {
+                Role::Follower
+            } else {
+                Role::Leader
+            }
+        );
+        if follower_first {
+            // Remove only the fixture's foreign seed so the independently
+            // scheduled monitor can acquire and enter its stuck renewal.
+            store.inner.delete(&key).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), renew_started.notified())
+            .await
+            .unwrap();
+        assert!(fence.current().is_some(), "the actual owner is renewing");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), coordinator.leave("db"))
+                .await
+                .is_err()
+        );
+        assert!(
+            coordinator.contains("db").await,
+            "interrupted leave retains the entry for retry"
+        );
+        tokio::time::timeout(Duration::from_secs(2), coordinator.leave("db"))
+            .await
+            .expect("retry must still join or abort the actual owner, not detach it")
+            .unwrap();
+        assert!(!coordinator.contains("db").await);
+        assert!(
+            fence.current().is_none(),
+            "completed retry must revoke the stopped owner's fence"
+        );
+        assert_eq!(
+            *store.release_observation.lock().unwrap(),
+            Some(false),
+            "release must observe the actual owner already stopped, not merely abort requested"
+        );
+    }
 }
 
 #[tokio::test]
